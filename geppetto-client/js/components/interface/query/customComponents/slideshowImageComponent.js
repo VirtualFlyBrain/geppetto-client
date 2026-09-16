@@ -90,19 +90,12 @@ define(function (require) {
       let that = this;
       if (typeof instances === "string") {
         if (instances.startsWith(this.state.imageID) || this.state.imageID === "") {
-          setTimeout(
-            function () {
-              that.setState ( { imageInstanceLoading : false } );
-            }, 1000);
+          that.scheduleLoadingDone();
         }
       } else {
         if (this.state.imageID !== "") {
           if (instances[0].getInstancePath().startsWith(this.state.imageID)) {
-            // Give a second before updating the checkbox state, otherwise set State happens too fast
-            setTimeout(
-              function () { 
-                that.setState ( { imageInstanceLoading : false } ); 
-              }, 1000);
+            that.scheduleLoadingDone();
           }
         }
       }
@@ -129,10 +122,30 @@ define(function (require) {
       GEPPETTO.on(GEPPETTO.Events.Instance_added, this.addedInstance, this);
     }
 
+    /**
+     * Give a second before updating the checkbox state, otherwise set State
+     * happens too fast. Tracked so componentWillUnmount can cancel it.
+     */
+    scheduleLoadingDone () {
+      var that = this;
+      clearTimeout(this.loadingTimer);
+      this.loadingTimer = setTimeout(function () {
+        that.loadingTimer = undefined;
+        that.setState({ imageInstanceLoading : false });
+      }, 1000);
+    }
+
     componentWillUnmount () {
-      // Remove listeners once unmounted
+      /*
+       * Remove listeners once unmounted. This must name the same event that
+       * componentDidMount subscribed to (Instance_added): it used to remove
+       * Instances_created instead, so addedInstance kept firing on dead
+       * components and calling setState on them.
+       */
       GEPPETTO.off(GEPPETTO.Events.Instance_deleted, this.deletedInstance, this);
-      GEPPETTO.off(GEPPETTO.Events.Instances_created, this.addedInstance, this);
+      GEPPETTO.off(GEPPETTO.Events.Instance_added, this.addedInstance, this);
+      clearTimeout(this.loadingTimer);
+      this.loadingTimer = undefined;
     }
 
     /**
