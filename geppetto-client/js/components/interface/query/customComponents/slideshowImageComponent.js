@@ -73,11 +73,22 @@ define(function (require) {
     }
 
     /**
+     * The instance id an image reference loads. Aligned images are referenced
+     * as "<template>,<image>" (addVfbId loads both), but the instance paths in
+     * Instance_added/Instance_deleted start with the image id alone, so match
+     * on that - comparing against the whole reference never matched, left the
+     * spinner up for good and made every later thumbnail click a no-op.
+     */
+    imageInstanceId (reference) {
+      return (reference || "").split(",").pop().replace(/[[\]]/g, "").trim();
+    }
+
+    /**
      * Instance deleted, update state to re-render checbox
      */
     deletedInstance (instance) {
       if (this.state.imageID !== "") {
-        if (instance.startsWith(this.state.imageID)) {
+        if (instance.startsWith(this.imageInstanceId(this.state.imageID))) {
           this.setState ( { imageInstanceLoading : false } );
         }
       }
@@ -88,13 +99,14 @@ define(function (require) {
      */
     addedInstance (instances) {
       let that = this;
+      var imageInstanceId = this.imageInstanceId(this.state.imageID);
       if (typeof instances === "string") {
-        if (instances.startsWith(this.state.imageID) || this.state.imageID === "") {
+        if (this.state.imageID === "" || instances.startsWith(imageInstanceId)) {
           that.scheduleLoadingDone();
         }
       } else {
         if (this.state.imageID !== "") {
-          if (instances[0].getInstancePath().startsWith(this.state.imageID)) {
+          if (instances[0].getInstancePath().startsWith(imageInstanceId)) {
             that.scheduleLoadingDone();
           }
         }
