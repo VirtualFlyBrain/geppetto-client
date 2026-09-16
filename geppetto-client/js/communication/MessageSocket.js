@@ -72,6 +72,46 @@ define(function (require) {
     var RECONNECT_MAX_DELAY_MS = 30 * 1000;
     var reconnectTimer = null;
     var reconnectStartedAt = null;
+    /*
+     * reconnectStartedAt is the budget clock: it keeps running across
+     * recoveries until a connection has stayed up for STABLE_CONNECTION_MS.
+     * dropStartedAt only measures how long this outage lasted, for reporting.
+     */
+    var dropStartedAt = null;
+
+    /*
+     * A socket can sit in CONNECTING for a long time when a load balancer
+     * accepts the connection but has no healthy backend yet (seen: ~57s during
+     * a redeploy). Give each attempt this long before treating it as failed.
+     */
+    var CONNECT_TIMEOUT_MS = 10 * 1000;
+    var connectTimer = null;
+
+    function cancelConnectTimer () {
+      if (connectTimer !== null) {
+        clearTimeout(connectTimer);
+        connectTimer = null;
+      }
+    }
+
+    /*
+     * A session that is "recovered" but drops again straight away, over and
+     * over, is not coming back: the server accepts the resume but cannot serve
+     * requests on it. After this many short-lived recoveries in a row, give up
+     * on the session and let the application start clean.
+     */
+    var MAX_UNSTABLE_RECOVERIES = 3;
+    var unstableRecoveries = 0;
+    var lastSessionReadyAt = null;
+
+    /*
+     * How many times each request has been replayed. A request that was
+     * replayed and then lost with the socket again is failed rather than
+     * replayed forever: if it is what kills the connection, retrying it only
+     * repeats the outage.
+     */
+    var MAX_REPLAYS = 1;
+    var replayCounts = {};
 
     /*
      * Backbone's trigger runs listeners synchronously and lets their
@@ -175,7 +215,15 @@ define(function (require) {
       var replayed = 0;
       var failed = 0;
       for (var id in lost) {
-        if (REPLAYABLE_COMMANDS[lost[id].command] === true) {
+        if (lost[id].command === "reconnect") {
+          /*
+           * The server only answers a resume when it fails, so a successful
+           * one stays "in flight" for good. It is not a lost user request.
+           */
+          delete callbackHandler[id];
+          continue;
+        }
+        if (REPLAYABLE_COMMANDS[lost[id].command] === true && (replayCounts[id] || 0) < MAX_REPLAYS) {
           queuePending(id, lost[id].template);
           replayed++;
         } else {
@@ -314,6 +362,16 @@ define(function (require) {
           GEPPETTO.MessageSocket.socket = new WebSocket(host);
           GEPPETTO.MessageSocket.host = host;
           GEPPETTO.MessageSocket.socket.binaryType = "arraybuffer";
+          var connecting = GEPPETTO.MessageSocket.socket;
+          cancelConnectTimer();
+          connectTimer = setTimeout(function () {
+            connectTimer = null;
+            if (connecting.readyState === 0) {
+              console.log("WebSocket Status - no connection after " + CONNECT_TIMEOUT_MS + "ms, abandoning this attempt");
+              // Closing a CONNECTING socket fires onclose (1006), which schedules the next attempt
+              connecting.close();
+            }
+          }, CONNECT_TIMEOUT_MS);
         } else if ('MozWebSocket' in window) {
           GEPPETTO.MessageSocket.socket = new MozWebSocket(host);
         } else {
@@ -322,6 +380,7 @@ define(function (require) {
         }
 
         GEPPETTO.MessageSocket.socket.onopen = function (e) {
+          cancelConnectTimer();
           GEPPETTO.CommandController.log(GEPPETTO.Resources.WEBSOCKET_OPENED, true);
 
           /*
@@ -378,6 +437,8 @@ define(function (require) {
             if (GEPPETTO.MessageSocket.socketStatus === GEPPETTO.Resources.SocketStatus.OPEN) {
               GEPPETTO.MessageSocket.attempts = 0;
               reconnectStartedAt = null;
+              unstableRecoveries = 0;
+              replayCounts = {};
             }
           }, STABLE_CONNECTION_MS);
           console.log("%c WebSocket Status - Opened ", 'background: #444; color: #bada55')
@@ -400,6 +461,33 @@ define(function (require) {
              * The attempt is counted once, in reconnect(); counting here as
              * well halved the budget.
              */
+            cancelConnectTimer();
+            if (GEPPETTO.MessageSocket.resyncing) {
+              /*
+               * The socket died while the session was being re-established.
+               * Resuming the half-built session on the next socket cannot
+               * work (it has no project), so stop here and let the
+               * application start clean.
+               */
+              requeueInFlight();
+              GEPPETTO.MessageSocket.lostConnectionId = undefined;
+              GEPPETTO.MessageSocket.socketStatus = GEPPETTO.Resources.SocketStatus.CLOSE;
+              GEPPETTO.MessageSocket.resyncFailed('connection closed during re-establish (' + e.code + ' ' + (e.reason || '') + ')');
+              break;
+            }
+            if (lastSessionReadyAt !== null && Date.now() - lastSessionReadyAt < STABLE_CONNECTION_MS) {
+              unstableRecoveries++;
+            }
+            lastSessionReadyAt = null;
+            if (unstableRecoveries >= MAX_UNSTABLE_RECOVERIES) {
+              unstableRecoveries = 0;
+              requeueInFlight();
+              GEPPETTO.MessageSocket.lostConnectionId = undefined;
+              GEPPETTO.MessageSocket.socketStatus = GEPPETTO.Resources.SocketStatus.CLOSE;
+              GEPPETTO.MessageSocket.resyncFailed('session dropped ' + MAX_UNSTABLE_RECOVERIES
+                + ' times straight after recovering (' + e.code + ' ' + (e.reason || '') + ')');
+              break;
+            }
             if (GEPPETTO.MessageSocket.lostConnectionId === undefined) {
               GEPPETTO.MessageSocket.lostConnectionId = GEPPETTO.MessageSocket.getClientID();
             }
@@ -476,6 +564,9 @@ define(function (require) {
         if (reconnectStartedAt === null) {
           reconnectStartedAt = Date.now();
         }
+        if (dropStartedAt === null) {
+          dropStartedAt = Date.now();
+        }
         var elapsed = Date.now() - reconnectStartedAt;
         if (elapsed < GEPPETTO.MessageSocket.reconnectBudgetMs) {
           GEPPETTO.MessageSocket.attempts++;
@@ -506,6 +597,7 @@ define(function (require) {
             + (e && e.code ? e.code + " " + (e.reason || "") : "unknown"));
           failPending('reconnection budget exhausted');
           reconnectStartedAt = null;
+          dropStartedAt = null;
           safeTrigger(GEPPETTO.Events.Websocket_disconnected, {
             reason: 'budget-exhausted',
             attempts: GEPPETTO.MessageSocket.attempts,
@@ -526,18 +618,33 @@ define(function (require) {
         GEPPETTO.MessageSocket.resyncing = false;
         var queued = pendingQueue;
         pendingQueue = [];
+        for (var id in inFlight) {
+          if (inFlight[id].command === "reconnect") {
+            // Answered by silence; see requeueInFlight
+            delete inFlight[id];
+            delete callbackHandler[id];
+          }
+        }
         for (var i = 0; i < queued.length; i++) {
+          replayCounts[queued[i].requestID] = (replayCounts[queued[i].requestID] || 0) + 1;
           this.waitForConnection(queued[i].template, connectionInterval);
         }
+        lastSessionReadyAt = Date.now();
         /*
          * How long the user was actually without a working session, and how
          * many retries it took. Reported by the application so a recovery
          * that technically worked but took a minute is distinguishable from
          * one that took a second.
          */
-        var downtimeMs = reconnectStartedAt === null ? 0 : Date.now() - reconnectStartedAt;
+        var downtimeMs = dropStartedAt === null ? 0 : Date.now() - dropStartedAt;
         var attempts = GEPPETTO.MessageSocket.attempts;
-        reconnectStartedAt = null;
+        /*
+         * Only the outage clock stops here. The budget clock keeps running
+         * until the connection proves stable (see onopen): resetting it on
+         * every recovery let a session that recovers and immediately drops
+         * again retry forever.
+         */
+        dropStartedAt = null;
         console.log("%c WebSocket Status - session " + (resumed ? "resumed" : "re-established")
           + " after " + downtimeMs + "ms and " + attempts + " attempt(s), replayed " + queued.length + " command(s) ",
         'background: #444; color: #bada55');
@@ -593,6 +700,8 @@ define(function (require) {
        */
       resyncFailed: function (reason) {
         cancelResyncTimer();
+        reconnectStartedAt = null;
+        dropStartedAt = null;
         GEPPETTO.MessageSocket.awaitingSession = false;
         GEPPETTO.MessageSocket.resyncing = false;
         failPending('session re-establish failed: ' + reason);
