@@ -1088,10 +1088,10 @@ define(function (require) {
                  * 10k-capped response while the true total is higher). The backend
                  * does not surface the true count to the client, so rather than
                  * trust the first page we keep pulling the next contiguous chunk
-                 * until one comes back short (< PAGE_SIZE = the genuine end); any
-                 * shortfall a cache returned is reconciled by the follow-on offset
-                 * pages. The duplicate-first-row guard stops a backend that ignores
-                 * offset, so this can never loop on repeats.
+                 * until one comes back EMPTY (the genuine end); a short page is
+                 * not an end, it is a backend that returned less than it was
+                 * asked for. The duplicate-first-row guard stops a backend that
+                 * ignores offset, so this can never loop on repeats.
                  */
                 if (formattedRecords.length >= PAGE_SIZE) {
                   var vfbStatus = function (loaded, done) {
@@ -1122,6 +1122,46 @@ define(function (require) {
                   };
                   var loadedSoFar = formattedRecords.length;
                   var lastRenderAt = loadedSoFar;
+                  /*
+                   * Rows already taken. A big result is paged over
+                   * minutes and the backend's row order is not stable for that
+                   * long, so the same row can come back on a later page (and
+                   * others be missed): a download of "Images of neurons with
+                   * some part in medulla" came back with 824 rows duplicated.
+                   * Keep the first copy of each row and drop exact repeats.
+                   */
+                  var seenRows = {};
+                  /*
+                   * Compared on the WHOLE row, not the id: some query types list
+                   * one term in several rows (a connectivity table, say), and
+                   * those are not duplicates. The rows that came back doubled
+                   * were identical in every column.
+                   */
+                  var rowSignature = function (row) {
+                    if (row === null || row === undefined) {
+                      return null;
+                    }
+                    var parts = [];
+                    for (var c = 0; c < columnsPresent.length; c++) {
+                      var value = row[columnsPresent[c]];
+                      parts.push(value === null || value === undefined ? '' : String(value));
+                    }
+                    return parts.join('\u0001');
+                  };
+                  var takeNewRows = function (rows) {
+                    var kept = [];
+                    for (var r = 0; r < rows.length; r++) {
+                      var signature = rowSignature(rows[r]);
+                      if (signature === null) {
+                        kept.push(rows[r]); /* nothing to compare on: keep it */
+                      } else if (seenRows[signature] !== true) {
+                        seenRows[signature] = true;
+                        kept.push(rows[r]);
+                      }
+                    }
+                    return kept;
+                  };
+                  takeNewRows(formattedRecords); /* page 0 is already on screen */
                   /*
                    * Default: render the table ONCE at the end. The header count
                    * updates independently every page (bumpHeader), so periodic
@@ -1198,10 +1238,11 @@ define(function (require) {
                       } catch (e) {
                         more = [];
                       }
-                      var isFull = more.length >= PAGE_SIZE;
-                      if (more.length > 0) {
-                        that.props.model.appendResults(compoundId, more, true, true); /* append, defer render */
-                        loadedSoFar += more.length;
+                      var pageRows = more.length;
+                      var fresh = takeNewRows(more);
+                      if (fresh.length > 0) {
+                        that.props.model.appendResults(compoundId, fresh, true, true); /* append, defer render */
+                        loadedSoFar += fresh.length;
                         vfbStatus(loadedSoFar, false);
                         if (loadedSoFar - lastRenderAt >= RENDER_EVERY) {
                           that.props.model.notifyChange(); /* periodic full render: new data visible */
@@ -1210,10 +1251,20 @@ define(function (require) {
                           bumpHeader(); /* cheap: keep the count climbing */
                         }
                       }
-                      if (isFull) {
-                        loadMore(loadedSoFar); /* full page: next chunk starts where we are */
+                      /*
+                       * Only an EMPTY page ends the stream. A short page used to,
+                       * which silently truncated a big result whenever the backend
+                       * returned fewer rows than asked for mid-result: the same
+                       * medulla query stopped at 46,269 rows of its 226,524,
+                       * because one page came back short. Offsets advance by what
+                       * the backend actually returned, so a short page just means
+                       * the next chunk starts earlier; the duplicate-first-row
+                       * guard above still stops a backend that ignores offset.
+                       */
+                      if (pageRows > 0) {
+                        loadMore(offset + pageRows);
                       } else {
-                        finish(); /* partial or empty page: end of stream */
+                        finish(); /* empty page: end of stream */
                       }
                     }, offset, PAGE_SIZE);
                   };
