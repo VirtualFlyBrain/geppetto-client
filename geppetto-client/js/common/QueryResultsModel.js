@@ -721,9 +721,17 @@ export function combineResults (list) {
     var r = { header: list[i].header || [], results: list[i].results || [] };
     if (final.header.length === 0) {
       final.header = r.header.slice();
-    } else if (final.header.join('') !== r.header.join('')) {
-      throw new Error('Multiple queries were executed but they returned incompatible headers');
     }
+    /*
+     * The server refused a compound run whose parts came back with different
+     * headers ("...incompatible headers"), which is most compound queries of
+     * two different types -- e.g. SimilarMorphologyTo (id, score, name, ...)
+     * AND epFrag (id, label, ...). Throwing here only handed the run to a
+     * server that fails the same way, leaving the user an error dialog and no
+     * results at all. The rows shown are the FIRST query's either way, so keep
+     * its header and rows and use the other queries solely to intersect on ID,
+     * which is what the loop below does.
+     */
     var ids = idsOf(r);
     if (i === 0) {
       final.results = r.results.slice(0, ids.length);
