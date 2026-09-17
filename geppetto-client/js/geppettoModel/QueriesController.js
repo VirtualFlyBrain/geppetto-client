@@ -21,6 +21,22 @@ define(function (require) {
          * @param callback
          */
         runQuery: function (queries, callback, offset, limit) {
+          /*
+           * A vfbquery query needs no server state: fetch v3-cached here and
+           * format the table as the server did. Anything else, or a failed
+           * fetch, goes to the server as before.
+           */
+          var that = this;
+          if (GEPPETTO.DirectQueries !== undefined && GEPPETTO.DirectQueries.canRun(queries)) {
+            GEPPETTO.DirectQueries.run(queries, callback, offset, limit, function () {
+              that.runQueryOnServer(queries, callback, offset, limit);
+            });
+            return;
+          }
+          this.runQueryOnServer(queries, callback, offset, limit);
+        },
+
+        runQueryOnServer: function (queries, callback, offset, limit) {
           var compoundQuery = [];
           for (var i = 0;i < queries.length;i++) {
             compoundQuery.push({
@@ -56,6 +72,17 @@ define(function (require) {
          * @param callback
          */
         getQueriesCount: function (queries, callback) {
+          var that = this;
+          if (GEPPETTO.DirectQueries !== undefined && GEPPETTO.DirectQueries.canRun(queries)) {
+            GEPPETTO.DirectQueries.count(queries, callback, function () {
+              that.getQueriesCountOnServer(queries, callback);
+            });
+            return;
+          }
+          this.getQueriesCountOnServer(queries, callback);
+        },
+
+        getQueriesCountOnServer: function (queries, callback) {
           if (queries.length > 0){
             var compoundQuery = [];
             for (var i = 0;i < queries.length;i++) {
