@@ -5,6 +5,8 @@ const SRC = process.env.MS_SRC || path.resolve(__dirname, '../../geppetto-client
 let now = 0; let timers = []; let tid = 0;
 global.setTimeout = (fn, ms) => { timers.push({ id: ++tid, at: now + (ms || 0), fn }); return tid; };
 global.clearTimeout = id => { timers = timers.filter(t => t.id !== id); };
+global.setInterval = (fn, ms) => { const id = ++tid; const tickAt = () => { timers.push({ id, at: now + (ms || 0), fn: () => { fn(); tickAt(); } }); }; tickAt(); return id; };
+global.clearInterval = global.clearTimeout;
 function advance (ms) { const end = now + ms; while (true) { timers.sort((a, b) => a.at - b.at); const t = timers[0]; if (!t || t.at > end) break; now = t.at; timers.shift(); t.fn(); } now = end; }
 global.Date = class extends Date { static now () { return now; } };
 // --- fake WebSocket ---

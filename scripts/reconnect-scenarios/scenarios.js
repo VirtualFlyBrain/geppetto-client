@@ -57,3 +57,22 @@ if (sc === 'unstable-reestablish') {
   advance(31000); last().open();
   assert(last().sent.some(m => m.type === 'load_project_from_url'), 'fresh session re-established in place instead');
 }
+if (sc === 'heartbeat') {
+  const beats = () => last().sent.filter(m => m.type === 'geppetto_version' && m.requestID.startsWith('c1-'));
+  const before = beats().length;
+  advance(250000);                                            // idle under the 300 s server cut-off
+  const sent = beats().length - before;
+  assert(sent === 4, 'idle socket carries one heartbeat a minute (' + sent + ' in 250 s)');
+  const handled = []; H.GEPPETTO.MessageHandler.onMessage = m => handled.push(m.type);
+  last().reply('geppetto_version', beats()[beats().length - 1].requestID, { geppetto_version: 'x' });
+  assert(!handled.includes('geppetto_version'), 'heartbeat reply is not routed to the handlers');
+  last().serverClose(1006); advance(31000); last().open();
+  MS.send('fetch_variable', 'VFB_1');                        // user click while resuming
+  const beatsWhileResuming = last().sent.filter(m => m.type === 'geppetto_version').length;
+  advance(120000);
+  assert(last().sent.filter(m => m.type === 'geppetto_version').length === beatsWhileResuming, 'no heartbeat while the session is unsettled');
+  last().reply('project_loaded', undefined, {});
+  advance(61000);
+  assert(last().sent.filter(m => m.type === 'geppetto_version').length === beatsWhileResuming + 1, 'heartbeat resumes once the session is back');
+  assert(!last().sent.some(m => m.type === 'geppetto_version' && m.requestID === undefined), 'every heartbeat carries a request id');
+}

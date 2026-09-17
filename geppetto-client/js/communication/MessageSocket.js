@@ -58,6 +58,61 @@ define(function (require) {
     }
 
     /*
+     * Heartbeat. Something on the server side of the path closes a socket
+     * that has carried nothing for 300 s (code 1006, no close frame, measured
+     * against the live deployment), and the client never speaks unless the
+     * user does, so anyone who reads a Term Info panel for five minutes is
+     * disconnected and put through a reconnect - or a reload when the resume
+     * lands on the wrong replica. A cheap request well inside that window
+     * keeps the socket in use. geppetto_version is answered without touching
+     * the session's project or manager. The reply is dropped here rather than
+     * routed to the handlers so it does not log a version line every minute,
+     * and the request is sent on the socket directly: it must not enter the
+     * pending queue, the in-flight table or the replay set, none of which
+     * should ever carry a heartbeat.
+     */
+    var HEARTBEAT_MS = 60 * 1000;
+    var heartbeatTimer = null;
+    var heartbeatRequestIDs = {};
+
+    function stopHeartbeat () {
+      if (heartbeatTimer !== null) {
+        clearInterval(heartbeatTimer);
+        heartbeatTimer = null;
+      }
+      heartbeatRequestIDs = {};
+    }
+
+    function startHeartbeat () {
+      stopHeartbeat();
+      heartbeatTimer = setInterval(function () {
+        var socket = GEPPETTO.MessageSocket.socket;
+        if (!socket || socket.readyState !== 1
+            || GEPPETTO.MessageSocket.socketStatus !== GEPPETTO.Resources.SocketStatus.OPEN
+            || GEPPETTO.MessageSocket.awaitingSession) {
+          // Not a healthy, settled connection: the reconnect logic owns it
+          return;
+        }
+        var requestID = GEPPETTO.MessageSocket.createRequestID();
+        heartbeatRequestIDs[requestID] = true;
+        try {
+          socket.send(messageTemplate(requestID, "geppetto_version", null));
+        } catch (e) {
+          delete heartbeatRequestIDs[requestID];
+        }
+      }, HEARTBEAT_MS);
+    }
+
+    function isHeartbeatReply (parsedServerMessage) {
+      var id = parsedServerMessage.requestID;
+      if (id !== undefined && heartbeatRequestIDs[id]) {
+        delete heartbeatRequestIDs[id];
+        return true;
+      }
+      return false;
+    }
+
+    /*
      * Reconnection is budgeted in wall-clock time rather than attempts, and
      * the retry interval backs off exponentially with jitter. An attempt
      * count at a fixed interval measured the budget in seconds (10 x 5 s),
@@ -422,6 +477,7 @@ define(function (require) {
            */
           cancelReconnectTimer();
           GEPPETTO.MessageSocket.socketStatus = GEPPETTO.Resources.SocketStatus.OPEN;
+          startHeartbeat();
           if (messageHandlers.length > 0) {
             /*
              * Ask the server to resume the session it held for our previous
@@ -497,6 +553,7 @@ define(function (require) {
         };
 
         GEPPETTO.MessageSocket.socket.onclose = function (e) {
+          stopHeartbeat();
           // This connection did not last; it must not hand the budget back
           cancelStableConnectionTimer();
           cancelResumeTimer();
@@ -987,6 +1044,10 @@ define(function (require) {
       } catch (err) {
         var truncatedLength = (typeof processedMessage === 'string') ? processedMessage.length : -1;
         handleCorruptFrame("truncated-message: " + err, truncatedLength + " characters");
+        return;
+      }
+
+      if (isHeartbeatReply(parsedServerMessage)) {
         return;
       }
 
