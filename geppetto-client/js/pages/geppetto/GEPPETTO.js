@@ -87,6 +87,7 @@ define(function (require) {
   require('../../communication/GEPPETTO.GlobalHandler')(GEPPETTO);
 
   GEPPETTO.Manager = new(require('../../common/Manager').default)();
+  GEPPETTO.DirectGeometry = new(require('../../common/DirectGeometry').default)(GEPPETTO);
 
   require('../../communication/MessageHandler')(GEPPETTO);
   require('./G')(GEPPETTO);

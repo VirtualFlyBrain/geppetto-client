@@ -164,6 +164,28 @@ Manager.prototype = {
     if (typeof typePaths == "string") {
       typePaths = [typePaths];
     }
+    /*
+     * OBJ and SWC imports need no server state: fetch the file here and
+     * merge the same type the server would have sent. Anything the client
+     * cannot resolve - other interpreters, a failed fetch - goes to the
+     * server as before.
+     */
+    if (GEPPETTO.DirectGeometry !== undefined && GEPPETTO.DirectGeometry.canResolve(typePaths)) {
+      var that = this;
+      GEPPETTO.DirectGeometry.resolve(typePaths, callback, function (paths) {
+        that.resolveImportTypeOnServer(paths, callback);
+      });
+      return;
+    }
+    this.resolveImportTypeOnServer(typePaths, callback);
+  },
+
+  /**
+   * Resolve import type on the server
+   *
+   * @param typePaths
+   */
+  resolveImportTypeOnServer: function (typePaths, callback) {
     var params = {};
     params["projectId"] = Project.getId();
     // replace client naming first occurrence - the server doesn't know about it
