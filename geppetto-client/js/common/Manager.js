@@ -101,20 +101,42 @@ Manager.prototype = {
    */
   fetchVariables: function (variableIds, datasourceId, callback) {
     if (!Object.prototype.hasOwnProperty.call(window.Model, variableIds)) {
-      var params = {};
-      params["projectId"] = Project.getId();
-      params["variableId"] = variableIds;
-      params["dataSourceId"] = datasourceId;
-
-      var requestID = GEPPETTO.MessageSocket.send("fetch_variable", params, callback);
-
-      GEPPETTO.trigger('spin_logo');
-
+      /*
+       * A VFB term's info needs no server state: fetch it here and merge
+       * the same model the server would have built. Any other datasource,
+       * or a failed fetch, goes to the server as before.
+       */
+      if (GEPPETTO.DirectTermInfo !== undefined && GEPPETTO.DirectTermInfo.canFetch(datasourceId)) {
+        var that = this;
+        var ids = typeof variableIds == "string" ? [variableIds] : variableIds;
+        GEPPETTO.DirectTermInfo.fetch(ids, datasourceId, callback, function (remaining) {
+          that.fetchVariablesOnServer(remaining, datasourceId, callback);
+        });
+        return;
+      }
+      this.fetchVariablesOnServer(variableIds, datasourceId, callback);
     } else {
       GEPPETTO.CommandController.log(GEPPETTO.Resources.VARIABLE_ALREADY_EXISTS);
       // the variable already exists, run the callback
       callback();
     }
+  },
+
+  /**
+   * Fetch variables from the server
+   *
+   * @param variableIds
+   * @param datasourceId
+   */
+  fetchVariablesOnServer: function (variableIds, datasourceId, callback) {
+    var params = {};
+    params["projectId"] = Project.getId();
+    params["variableId"] = variableIds;
+    params["dataSourceId"] = datasourceId;
+
+    var requestID = GEPPETTO.MessageSocket.send("fetch_variable", params, callback);
+
+    GEPPETTO.trigger('spin_logo');
   },
 
   /**

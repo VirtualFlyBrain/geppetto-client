@@ -88,6 +88,7 @@ define(function (require) {
 
   GEPPETTO.Manager = new(require('../../common/Manager').default)();
   GEPPETTO.DirectGeometry = new(require('../../common/DirectGeometry').default)(GEPPETTO);
+  GEPPETTO.DirectTermInfo = new(require('../../common/DirectTermInfo').default)(GEPPETTO);
 
   require('../../communication/MessageHandler')(GEPPETTO);
   require('./G')(GEPPETTO);

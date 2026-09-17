@@ -290,6 +290,13 @@ export default function DirectGeometry (GEPPETTO) {
    * Resolve the import types in place. Calls callback() once all are merged,
    * or fallback(paths) if anything failed so the caller can go to the server.
    */
+  /*
+   * VFB asks for the same import more than once while a term loads (the
+   * loader and the viewer both resolve it). The second request used to be a
+   * second download; now it waits for the first and shares its outcome.
+   */
+  var inFlight = {};
+
   this.resolve = function (typePaths, callback, fallback) {
     var that = this;
     var pending = typePaths.length;
@@ -307,6 +314,27 @@ export default function DirectGeometry (GEPPETTO) {
       }
     };
     var one = function (path) {
+      if (inFlight[path] !== undefined) {
+        inFlight[path].push(function (ok) {
+          if (!ok) {
+            failed = true;
+          }
+          done();
+        });
+        return;
+      }
+      inFlight[path] = [];
+      var settle = function (ok) {
+        var waiters = inFlight[path];
+        delete inFlight[path];
+        if (!ok) {
+          failed = true;
+        }
+        done();
+        for (var w = 0; w < waiters.length; w++) {
+          waiters[w](ok);
+        }
+      };
       var found = that.findImportType(path);
       var kind = interpreterKind(found.type.getModelInterpreterId());
       var url = fetchUrl(found.type.getUrl(), window.location.protocol);
@@ -337,12 +365,11 @@ export default function DirectGeometry (GEPPETTO) {
         var rawModel = wrapResolvedType(that.modelShape(), found.library.getId(), rawType);
         GEPPETTO.Manager.swapResolvedType(rawModel);
         report(true);
-        done();
+        settle(true);
       }).catch(function (err) {
         console.error('DirectGeometry - could not resolve ' + path + ' in the client, asking the server: ' + (err && err.message ? err.message : err));
         report(false);
-        failed = true;
-        done();
+        settle(false);
       });
     };
     for (var i = 0; i < typePaths.length; i++) {
