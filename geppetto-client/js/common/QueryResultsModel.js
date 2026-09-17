@@ -371,6 +371,21 @@ function imageMarkdownToVariableJson (s, imageTypeRef) {
     if (url === null || url === undefined || url.trim().length === 0) {
       continue;
     }
+    /*
+     * A row's thumbnail markdown references the plain image id, the same id for
+     * every template the image is aligned to -- so a carousel of alignments gave
+     * every slide the same reference and clicking the VNC (or any non-first)
+     * slide loaded the first alignment instead. The template is in the
+     * thumbnail's URL, so carry it in the reference, matching the
+     * "<template>,<image>" form a plain-URL thumbnail already produces and that
+     * the carousel ordering and the frontend's loader both read.
+     */
+    if (ref.indexOf(',') < 0) {
+      var tm = VFB_THUMBNAIL_URL_TEMPLATE.exec(url.trim());
+      if (tm && tm[1] && tm[1] !== ref) {
+        ref = tm[1] + ',' + ref;
+      }
+    }
     elements.push({
       eClass: 'ArrayElement',
       index: elements.length,
