@@ -736,7 +736,19 @@ export function termInfoToRawModel (termInfo, variableId, shape, libs) {
     var downloadFiles = '';
     var domains = buildDomains(ti);
     var loadedTemplate = '';
-    if (imageKeys.length > 1) {
+    /*
+     * The server built one term at a time, so a scene's template was always in
+     * the model before any image on it. Here terms are fetched several at a
+     * time and an image can arrive first; the model check below then finds no
+     * template and the first Images key wins -- geometry for the wrong template
+     * and a spurious "aligned to another template" prompt. The frontend claims
+     * the scene's template up front (window.templateID), so trust that first.
+     */
+    var sceneTemplate = (typeof window !== 'undefined' && window && typeof window.templateID === 'string') ? window.templateID : '';
+    if (imageKeys.length > 1 && sceneTemplate !== '' && AVAILABLE_TEMPLATES.indexOf(sceneTemplate) > -1) {
+      loadedTemplate = sceneTemplate;
+    }
+    if (imageKeys.length > 1 && loadedTemplate === '') {
       for (var a = 0; a < AVAILABLE_TEMPLATES.length; a++) {
         if (view.hasType(L.target, AVAILABLE_TEMPLATES[a] + '_metadata')) {
           loadedTemplate = AVAILABLE_TEMPLATES[a];
