@@ -1043,8 +1043,16 @@ define(['jquery'], function () {
         var geometry = new THREE.BufferGeometry();
         geometry.addAttribute('position', new THREE.BufferAttribute(node.objGeometry.positions, 3));
         geometry.setIndex(new THREE.BufferAttribute(node.objGeometry.indices, 1));
+        /*
+         * The same material OBJLoader gives a mesh with no MTL (see its
+         * `if (!material)` branch): Lambert, both sides drawn, transparent
+         * without writing depth. A MeshPhongMaterial here rendered the
+         * templates solid instead of see-through.
+         */
         scene = new THREE.Object3D();
-        scene.add(new THREE.Mesh(geometry, new THREE.MeshPhongMaterial()));
+        scene.add(new THREE.Mesh(geometry, new THREE.MeshLambertMaterial({
+          side: THREE.DoubleSide, opacity: 1, transparent: true, depthWrite: false
+        })));
       } else {
         var manager = new THREE.LoadingManager();
         manager.onProgress = function (item, loaded, total) {
