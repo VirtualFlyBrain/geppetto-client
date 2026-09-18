@@ -473,14 +473,33 @@ export default function DirectGeometry (GEPPETTO) {
     var that = this;
     var pending = typePaths.length;
     var failed = false;
+    /*
+     * The server can only resolve imports of terms it built itself. For one
+     * this client built (VFB2 #502 phase 2) it answers "Couldn't find a type
+     * for the path ...", so a failure here is the end of it: report it and
+     * let the application decide what to show instead.
+     */
+    var serverKnows = function (paths) {
+      var built = (GEPPETTO.DirectTermInfo !== undefined) ? GEPPETTO.DirectTermInfo.builtHere : undefined;
+      if (built === undefined) {
+        return true;
+      }
+      for (var i = 0; i < paths.length; i++) {
+        var leaf = paths[i].split('.').pop();
+        if (built[leaf.replace(/_(obj|swc)$/, '')] === true) {
+          return false;
+        }
+      }
+      return true;
+    };
     GEPPETTO.trigger('spin_logo');
     var done = function () {
       pending--;
       if (pending === 0) {
         GEPPETTO.trigger('stop_spin_logo');
-        if (failed) {
+        if (failed && serverKnows(typePaths)) {
           fallback(typePaths);
-        } else if (callback !== undefined) {
+        } else if (callback !== undefined && !failed) {
           callback();
         }
       }
@@ -530,9 +549,14 @@ export default function DirectGeometry (GEPPETTO) {
         if (kind === 'obj' && response.body !== undefined && response.body !== null
           && typeof response.body.getReader === 'function' && typeof TextDecoder === 'function') {
           return readObjStream(response).then(function (geometry) {
-            if (geometry.faceCount === 0) {
-              throw new Error('no faces parsed from ' + url);
+            if (geometry.vertexCount === 0) {
+              throw new Error('no vertices parsed from ' + url);
             }
+            /*
+             * No faces is not a failure: an expression pattern's volume.obj
+             * is a point cloud, vertices only, and the viewer draws it as
+             * one. Only an empty file is a failure.
+             */
             return objGeometryToRawType(found.type.getId(), geometry);
           });
         }

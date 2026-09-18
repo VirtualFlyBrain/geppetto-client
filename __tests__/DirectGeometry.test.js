@@ -262,3 +262,28 @@ test('readObjStream reads the body a chunk at a time', async () => {
   expect(g.vertexCount).toBe(3);
   expect(Array.from(g.indices)).toEqual([0, 1, 2]);
 });
+
+test('a vertex-only OBJ is a point cloud, not a failure', () => {
+  // expression patterns publish volume.obj with vertices and no faces
+  const g = parseObj(['# VFB point cloud\nv 1 2 3\nv 4 5 6\n']);
+  expect(g.vertexCount).toBe(2);
+  expect(g.faceCount).toBe(0);
+  const raw = DirectGeometryModule.objGeometryToRawType('VFB_x0000001_obj', g);
+  expect(Array.from(raw.defaultValue.objGeometry.positions)).toEqual([1, 2, 3, 4, 5, 6]);
+  expect(raw.defaultValue.objGeometry.indices.length).toBe(0);
+});
+
+test('a term the client built is not sent to the server, which never saw it', async () => {
+  loadTerm();
+  GEPPETTO.DirectTermInfo = { builtHere: { VFB_jrmc2yzg: true } };
+  global.fetch = jest.fn(() => Promise.resolve({ ok: false, status: 404 }));
+  delete window.location;
+  window.location = { protocol: 'https:' };
+  GEPPETTO.MessageSocket.send.mockClear();
+  GEPPETTO.DirectGeometry.enabled = true;
+  GEPPETTO.Manager.resolveImportType('SWCLibrary.VFB_jrmc2yzg_swc', () => null);
+  await new Promise(r => setTimeout(r, 10));
+  // asking would come back as "Couldn't find a type for the path ..."
+  expect(GEPPETTO.MessageSocket.send).not.toHaveBeenCalled();
+  delete GEPPETTO.DirectTermInfo;
+});

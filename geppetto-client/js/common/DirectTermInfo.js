@@ -59,6 +59,14 @@ export default function DirectTermInfo (GEPPETTO) {
    * one merge per id is the same model). Calls callback() when all are in,
    * or fallback(ids) if anything failed so the caller can ask the server.
    */
+  /*
+   * Terms this client built. The server never saw them, so it cannot resolve
+   * anything of theirs: asking it for one of their imports comes back as
+   * "Couldn't find a type for the path ...", which is worse than failing
+   * here. DirectGeometry checks this before falling back.
+   */
+  this.builtHere = {};
+
   this.fetch = function (variableIds, datasourceId, callback, fallback) {
     var that = this;
     var datasource = this.findDatasource(datasourceId);
@@ -90,6 +98,7 @@ export default function DirectTermInfo (GEPPETTO) {
         var shape = shapeOf(GEPPETTO.ModelFactory.geppettoModel);
         var built = termInfoToRawModel(termInfo, id, shape);
         GEPPETTO.Manager.addVariableToModel(built.rawModel);
+        that.builtHere[id] = true;
         report(true, id);
         next(i + 1);
       }).catch(function (err) {

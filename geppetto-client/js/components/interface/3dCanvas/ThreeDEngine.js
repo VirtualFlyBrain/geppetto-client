@@ -1039,7 +1039,18 @@ define(['jquery'], function () {
        * expands every face into its own three vertices. Everything else,
        * including anything the server resolved, still comes as text.
        */
-      if (node.objGeometry !== undefined && node.objGeometry !== null) {
+      if (node.objGeometry !== undefined && node.objGeometry !== null
+        && node.objGeometry.indices.length === 0) {
+        /*
+         * Vertices and no faces: an expression pattern's point cloud. Built
+         * by the loader's own createMesh, the same call it makes for a
+         * vertex-only OBJ, so these look exactly as they always have.
+         */
+        var pointLoader = new THREE.OBJLoader(new THREE.LoadingManager());
+        scene = new THREE.Object3D();
+        scene.add(pointLoader.createMesh(node.objGeometry.positions,
+          ('0x' + Math.floor(Math.random() * 16777215).toString(16))));
+      } else if (node.objGeometry !== undefined && node.objGeometry !== null) {
         var geometry = new THREE.BufferGeometry();
         geometry.addAttribute('position', new THREE.BufferAttribute(node.objGeometry.positions, 3));
         geometry.setIndex(new THREE.BufferAttribute(node.objGeometry.indices, 1));
