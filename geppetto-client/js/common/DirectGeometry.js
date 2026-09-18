@@ -36,6 +36,178 @@ export function objToRawType (id, objText) {
 }
 
 /**
+ * V8 cannot hold a string longer than this many characters, so an OBJ bigger
+ * than it can never be read with response.text() -- the fetch succeeds and the
+ * read throws. VFB publishes meshes well past it (APL_R's is 626MB), which is
+ * why the OBJ is parsed from the stream instead of from one string.
+ */
+export var MAX_OBJ_TEXT = 536870888;
+
+function grownTo (array, needed) {
+  if (needed <= array.length) {
+    return array;
+  }
+  var size = array.length;
+  while (size < needed) {
+    size = size * 2;
+  }
+  var grown = new array.constructor(size);
+  grown.set(array);
+  return grown;
+}
+
+/*
+ * One vertex index out of an OBJ face token: "12", "12/3", "12/3/4" and
+ * "12//4" all mean vertex 12, and a negative index counts back from the
+ * vertices seen so far (-1 is the last one).
+ */
+function faceVertex (token, vertexCount) {
+  var slash = token.indexOf('/');
+  var index = parseInt(slash === -1 ? token : token.substring(0, slash), 10);
+  if (isNaN(index)) {
+    return -1;
+  }
+  return index < 0 ? vertexCount + index : index - 1;
+}
+
+/**
+ * A parser that takes an OBJ a chunk of text at a time and keeps only the
+ * geometry, as an indexed mesh.
+ *
+ * Indexed is the point as much as streaming is: THREE.OBJLoader expands every
+ * face into its own three vertices, so a mesh costs (faces x 9) floats however
+ * it arrived. Kept indexed, the same mesh is (vertices x 3) floats plus
+ * (faces x 3) indices -- for APL_R, ~260MB rather than ~1GB, before normals.
+ *
+ * Only v and f lines carry geometry here. vn and vt are ignored because the
+ * viewer recomputes normals on every mesh it loads anyway, and VFB's meshes
+ * (trimesh and ImageJ exports) carry neither. Faces with more than three
+ * vertices are triangulated as a fan.
+ */
+export function createObjParser () {
+  var positions = new Float32Array(1 << 16);
+  var indices = new Uint32Array(1 << 16);
+  var positionCount = 0;
+  var indexCount = 0;
+  var rest = '';
+
+  var vertex = function (line) {
+    var f = line.split(/\s+/);
+    positions = grownTo(positions, positionCount + 3);
+    positions[positionCount++] = parseFloat(f[1]);
+    positions[positionCount++] = parseFloat(f[2]);
+    positions[positionCount++] = parseFloat(f[3]);
+  };
+
+  var face = function (line) {
+    var f = line.split(/\s+/);
+    var vertexCount = positionCount / 3;
+    var first = faceVertex(f[1], vertexCount);
+    if (first < 0) {
+      return;
+    }
+    for (var k = 3; k < f.length; k++) {
+      var b = faceVertex(f[k - 1], vertexCount);
+      var c = faceVertex(f[k], vertexCount);
+      if (b < 0 || c < 0) {
+        continue;
+      }
+      indices = grownTo(indices, indexCount + 3);
+      indices[indexCount++] = first;
+      indices[indexCount++] = b;
+      indices[indexCount++] = c;
+    }
+  };
+
+  var line = function (text) {
+    if (text.length < 6) {
+      return;
+    }
+    var kind = text.charCodeAt(0);
+    if (text.charCodeAt(1) !== 32) {
+      return;
+    }
+    if (kind === 118) {
+      vertex(text);
+    } else if (kind === 102) {
+      face(text);
+    }
+  };
+
+  return {
+    /** Feed the next piece of the file; chunk boundaries may fall mid-line. */
+    push: function (chunk) {
+      var text = rest + chunk;
+      var start = 0;
+      var end = text.indexOf('\n');
+      while (end !== -1) {
+        line(text.substring(start, end));
+        start = end + 1;
+        end = text.indexOf('\n', start);
+      }
+      rest = text.substring(start);
+    },
+    /** No more text: flush the last line and hand back what was found. */
+    finish: function () {
+      if (rest.length > 0) {
+        line(rest);
+        rest = '';
+      }
+      return {
+        positions: positions.subarray(0, positionCount),
+        indices: indices.subarray(0, indexCount),
+        vertexCount: positionCount / 3,
+        faceCount: indexCount / 3
+      };
+    }
+  };
+}
+
+/**
+ * Build the raw VisualType for an OBJ that was parsed rather than read whole.
+ * Same shape as objToRawType, with the geometry in place of the text: nothing
+ * but the viewer reads either, and the viewer prefers the geometry.
+ *
+ * @param id - the import type's id (e.g. VFB_00101567_obj)
+ * @param geometry - {positions, indices} from createObjParser().finish()
+ */
+export function objGeometryToRawType (id, geometry) {
+  return {
+    eClass: 'VisualType',
+    id: id,
+    name: id,
+    abstract: false,
+    defaultValue: {
+      eClass: 'OBJ',
+      obj: '',
+      objGeometry: { positions: geometry.positions, indices: geometry.indices }
+    }
+  };
+}
+
+/**
+ * Parse an OBJ response body as it arrives.
+ *
+ * @returns a promise for {positions, indices, vertexCount, faceCount}
+ */
+export function readObjStream (response) {
+  var parser = createObjParser();
+  var decoder = new TextDecoder('utf-8');
+  var reader = response.body.getReader();
+  var step = function () {
+    return reader.read().then(function (result) {
+      if (result.done) {
+        parser.push(decoder.decode());
+        return parser.finish();
+      }
+      parser.push(decoder.decode(result.value, { stream: true }));
+      return step();
+    });
+  };
+  return step();
+}
+
+/**
  * Parse SWC text into the samples the interpreter emits: every line with a
  * parent, in file order. Comment lines, blank lines and lines with fewer than
  * seven fields are skipped, as the server's interpreter skips them.
@@ -346,22 +518,35 @@ export default function DirectGeometry (GEPPETTO) {
           // reporting must never break resolution
         }
       };
+      /*
+       * An OBJ is parsed from the stream: the file never becomes one string,
+       * so V8's string ceiling stops applying and the mesh is kept indexed
+       * rather than expanded face by face. SWC is small and stays text.
+       */
       fetch(url).then(function (response) {
         if (!response.ok) {
           throw new Error('HTTP ' + response.status + ' fetching ' + url);
         }
-        return response.text();
-      }).then(function (text) {
-        var rawType;
-        if (kind === 'obj') {
-          rawType = objToRawType(found.type.getId(), text);
-        } else {
+        if (kind === 'obj' && response.body !== undefined && response.body !== null
+          && typeof response.body.getReader === 'function' && typeof TextDecoder === 'function') {
+          return readObjStream(response).then(function (geometry) {
+            if (geometry.faceCount === 0) {
+              throw new Error('no faces parsed from ' + url);
+            }
+            return objGeometryToRawType(found.type.getId(), geometry);
+          });
+        }
+        return response.text().then(function (text) {
+          if (kind === 'obj') {
+            return objToRawType(found.type.getId(), text);
+          }
           var ref = that.visualTypeRef();
           if (ref === null) {
             throw new Error('no Visual type in the model to build SWC segments from');
           }
-          rawType = swcToRawType(found.type.getId(), text, ref);
-        }
+          return swcToRawType(found.type.getId(), text, ref);
+        });
+      }).then(function (rawType) {
         var rawModel = wrapResolvedType(that.modelShape(), found.library.getId(), rawType);
         GEPPETTO.Manager.swapResolvedType(rawModel);
         report(true);

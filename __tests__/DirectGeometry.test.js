@@ -185,3 +185,80 @@ test('SWC parsing: comments, blanks, short lines, orphans, soma roots, non-posit
   expect(values[3].bottomRadius).toBe(1);
   expect(values[3].topRadius).toBe(1);
 });
+
+/*
+ * An OBJ is parsed as it streams in, so the file never becomes one string: V8
+ * cannot hold a string longer than 536,870,888 characters and VFB publishes
+ * meshes well past that (APL_R's is 626MB). Kept indexed too, which is a
+ * quarter of the memory OBJLoader's face-by-face expansion costs.
+ */
+const parseObj = (chunks) => {
+  const parser = DirectGeometryModule.createObjParser();
+  chunks.forEach(chunk => parser.push(chunk));
+  return parser.finish();
+};
+
+test('OBJ parsing: vertices and faces, whatever the chunks land on', () => {
+  const obj = '# a cube corner\nv 0 0 0\nv 1 0 0\nv 0 1 0\nv 0 0 1\nf 1 2 3\nf 1 2 4\n';
+  const whole = parseObj([obj]);
+  expect(whole.vertexCount).toBe(4);
+  expect(whole.faceCount).toBe(2);
+  expect(Array.from(whole.positions)).toEqual([0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 1]);
+  // OBJ counts from 1; the buffer counts from 0
+  expect(Array.from(whole.indices)).toEqual([0, 1, 2, 0, 1, 3]);
+
+  // Chunk boundaries fall wherever the network puts them, including mid-line
+  // and mid-number, and the last line may arrive without its newline.
+  for (let cut = 1; cut < obj.length; cut++) {
+    const split = parseObj([obj.substring(0, cut), obj.substring(cut)]);
+    expect(Array.from(split.positions)).toEqual(Array.from(whole.positions));
+    expect(Array.from(split.indices)).toEqual(Array.from(whole.indices));
+  }
+  const noTrailingNewline = parseObj([obj.trim()]);
+  expect(noTrailingNewline.faceCount).toBe(2);
+});
+
+test('OBJ parsing: face forms, polygons, negative indices, lines to ignore', () => {
+  const obj = [
+    'v 0 0 0', 'v 1 0 0', 'v 1 1 0', 'v 0 1 0',
+    'vn 0 0 1', 'vt 0 0', 'g group', 'o object', 'usemtl red', 's off', '',
+    'f 1/1/1 2/2/1 3/3/1',   // texture and normal indices are not geometry
+    'f 1//1 3//1 4//1',
+    'f 1 2 3 4',             // a quad is triangulated as a fan
+    'f -4 -3 -2'             // counting back from the vertices seen so far
+  ].join('\n');
+  const g = parseObj([obj]);
+  expect(g.vertexCount).toBe(4);
+  expect(Array.from(g.indices)).toEqual([
+    0, 1, 2,
+    0, 2, 3,
+    0, 1, 2, 0, 2, 3,
+    0, 1, 2
+  ]);
+});
+
+test('a parsed mesh is handed on as a VisualType, geometry in place of text', () => {
+  const g = parseObj(['v 0 0 0\nv 1 0 0\nv 0 1 0\nf 1 2 3\n']);
+  const raw = DirectGeometryModule.objGeometryToRawType('VFB_x_obj', g);
+  const asText = DirectGeometryModule.objToRawType('VFB_x_obj', 'v 0 0 0\n');
+  expect(raw.eClass).toBe(asText.eClass);
+  expect(raw.id).toBe('VFB_x_obj');
+  expect(raw.defaultValue.eClass).toBe('OBJ');
+  expect(raw.defaultValue.obj).toBe('');
+  expect(Array.from(raw.defaultValue.objGeometry.indices)).toEqual([0, 1, 2]);
+});
+
+test('readObjStream reads the body a chunk at a time', async () => {
+  // jsdom has neither, the browser has both.
+  const util = require('util');
+  global.TextDecoder = util.TextDecoder;
+  const encoder = new util.TextEncoder();
+  const chunks = ['v 0 0 0\nv 1 0 ', '0\nv 0 1 0\nf 1 2 3\n'].map(c => encoder.encode(c));
+  let next = 0;
+  const response = { body: { getReader: () => ({
+    read: () => Promise.resolve(next < chunks.length ? { done: false, value: chunks[next++] } : { done: true })
+  }) } };
+  const g = await DirectGeometryModule.readObjStream(response);
+  expect(g.vertexCount).toBe(3);
+  expect(Array.from(g.indices)).toEqual([0, 1, 2]);
+});

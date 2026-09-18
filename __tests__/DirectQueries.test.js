@@ -51,11 +51,22 @@ const capture = (id, q) => ({
   count: parseInt(readJson(res(`${id}__${q}/return_query_count.json`)).return_query_count, 10)
 });
 
+/*
+ * An image reference now carries the template it is aligned to
+ * ("VFB_00101384,VFB_00101485" where the server said "VFB_00101485"), so that
+ * each slide of a multi-alignment carousel loads its own alignment instead of
+ * all of them loading the first. That prefix is the one intended difference
+ * from these captures -- and some were recaptured after the change and carry
+ * it, so it is dropped from both sides; everything else must still match byte
+ * for byte.
+ */
+const withoutTemplatePrefix = json => json.replace(/\\"reference\\":\\"VFB_\w+,/g, '\\"reference\\":\\"');
+
 test('the table built in the client is the server reply, byte for byte', () => {
   for (const [id, q, name] of order) {
     const c = capture(id, q);
     const ours = QueryResultsModel.responseToQueryResults(c.response, { id, name }, IMAGE_REF);
-    expect(JSON.stringify(ours)).toBe(c.server);
+    expect(withoutTemplatePrefix(JSON.stringify(ours))).toBe(withoutTemplatePrefix(c.server));
     expect(QueryResultsModel.responseToCount(c.response)).toBe(c.count);
   }
 });
@@ -101,7 +112,14 @@ test('a compound run intersects on ID in the order given', () => {
   const b = { eClass: 'QueryResults', header: ['ID', 'Name'], results: [{ values: ['3', 'c'] }, { values: ['1', 'a'] }] };
   expect(QueryResultsModel.combineResults([a, b]).results.map(r => r.values[0])).toEqual(['1', '3']);
   expect(QueryResultsModel.combineResults([a])).toBe(a);
-  expect(() => QueryResultsModel.combineResults([a, { header: ['ID'], results: [] }])).toThrow(/incompatible headers/);
+  /*
+   * Queries with different columns used to throw, which killed every compound
+   * run from a URL. The first query's table is kept and intersected instead.
+   */
+  const narrow = { eClass: 'QueryResults', header: ['ID'], results: [{ values: ['2'] }] };
+  const mixed = QueryResultsModel.combineResults([a, narrow]);
+  expect(mixed.header).toEqual(['ID', 'Name']);
+  expect(mixed.results.map(r => r.values)).toEqual([['2', 'b']]);
 });
 
 function loadModel () {

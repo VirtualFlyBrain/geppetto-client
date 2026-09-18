@@ -1030,13 +1030,29 @@ define(['jquery'], function () {
      * @returns {*}
      */
     loadThreeOBJModelFromNode: function (node) {
-      var manager = new THREE.LoadingManager();
-      manager.onProgress = function (item, loaded, total) {
-        console.log(item, loaded, total);
-      };
-      var loader = new THREE.OBJLoader(manager);
-      var scene = loader.parse(node.obj);
       var that = this;
+      var scene;
+      /*
+       * A mesh parsed from the stream arrives as an indexed geometry rather
+       * than OBJ text -- the only way to load one past V8's string ceiling,
+       * and a quarter of the memory for the ones below it, since OBJLoader
+       * expands every face into its own three vertices. Everything else,
+       * including anything the server resolved, still comes as text.
+       */
+      if (node.objGeometry !== undefined && node.objGeometry !== null) {
+        var geometry = new THREE.BufferGeometry();
+        geometry.addAttribute('position', new THREE.BufferAttribute(node.objGeometry.positions, 3));
+        geometry.setIndex(new THREE.BufferAttribute(node.objGeometry.indices, 1));
+        scene = new THREE.Object3D();
+        scene.add(new THREE.Mesh(geometry, new THREE.MeshPhongMaterial()));
+      } else {
+        var manager = new THREE.LoadingManager();
+        manager.onProgress = function (item, loaded, total) {
+          console.log(item, loaded, total);
+        };
+        var loader = new THREE.OBJLoader(manager);
+        scene = loader.parse(node.obj);
+      }
       scene.traverse(function (child) {
         if (child instanceof THREE.Mesh) {
           that.setThreeColor(child.material.color, GEPPETTO.Resources.COLORS.DEFAULT);
