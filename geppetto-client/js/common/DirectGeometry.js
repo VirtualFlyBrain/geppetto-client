@@ -35,7 +35,8 @@ export function objToRawType (id, objText) {
   };
 }
 
-import { fetchWithRetry, failureReason, callTag } from './RetryFetch';
+import { fetchWithRetry, failureReason, callTag, spreadUrl } from './RetryFetch';
+import * as workerPool from './ObjWorkerPool';
 
 /**
  * V8 cannot hold a string longer than this many characters, so an OBJ bigger
@@ -44,33 +45,6 @@ import { fetchWithRetry, failureReason, callTag } from './RetryFetch';
  * why the OBJ is parsed from the stream instead of from one string.
  */
 export var MAX_OBJ_TEXT = 536870888;
-
-function grownTo (array, needed) {
-  if (needed <= array.length) {
-    return array;
-  }
-  var size = array.length;
-  while (size < needed) {
-    size = size * 2;
-  }
-  var grown = new array.constructor(size);
-  grown.set(array);
-  return grown;
-}
-
-/*
- * One vertex index out of an OBJ face token: "12", "12/3", "12/3/4" and
- * "12//4" all mean vertex 12, and a negative index counts back from the
- * vertices seen so far (-1 is the last one).
- */
-function faceVertex (token, vertexCount) {
-  var slash = token.indexOf('/');
-  var index = parseInt(slash === -1 ? token : token.substring(0, slash), 10);
-  if (isNaN(index)) {
-    return -1;
-  }
-  return index < 0 ? vertexCount + index : index - 1;
-}
 
 /**
  * A parser that takes an OBJ a chunk of text at a time and keeps only the
@@ -87,6 +61,33 @@ function faceVertex (token, vertexCount) {
  * vertices are triangulated as a fan.
  */
 export function createObjParser () {
+  function grownTo (array, needed) {
+    if (needed <= array.length) {
+      return array;
+    }
+    var size = array.length;
+    while (size < needed) {
+      size = size * 2;
+    }
+    var grown = new array.constructor(size);
+    grown.set(array);
+    return grown;
+  }
+
+  /*
+   * One vertex index out of an OBJ face token: "12", "12/3", "12/3/4" and
+   * "12//4" all mean vertex 12, and a negative index counts back from the
+   * vertices seen so far (-1 is the last one).
+   */
+  function faceVertex (token, vertexCount) {
+    var slash = token.indexOf('/');
+    var index = parseInt(slash === -1 ? token : token.substring(0, slash), 10);
+    if (isNaN(index)) {
+      return -1;
+    }
+    return index < 0 ? vertexCount + index : index - 1;
+  }
+
   var positions = new Float32Array(1 << 16);
   var indices = new Uint32Array(1 << 16);
   var positionCount = 0;
@@ -553,34 +554,59 @@ export default function DirectGeometry (GEPPETTO) {
        * rather than expanded face by face. SWC is small and stays text.
        */
       var attemptsUsed = 1;
-      fetchWithRetry(url).then(function (result) {
-        attemptsUsed = result.attempts;
-        var response = result.response;
-        if (kind === 'obj' && response.body !== undefined && response.body !== null
+      /*
+       * Fetch and parse here on the main thread: the path that has always
+       * been used, and the fallback whenever the worker cannot be.
+       */
+      var inline = function () {
+        return fetchWithRetry(url).then(function (result) {
+          attemptsUsed = result.attempts;
+          var response = result.response;
+          if (kind === 'obj' && response.body !== undefined && response.body !== null
           && typeof response.body.getReader === 'function' && typeof TextDecoder === 'function') {
-          return readObjStream(response).then(function (geometry) {
-            if (geometry.vertexCount === 0) {
-              throw new Error('no vertices parsed from ' + url);
+            return readObjStream(response).then(function (geometry) {
+              if (geometry.vertexCount === 0) {
+                throw new Error('no vertices parsed from ' + url);
+              }
+              /*
+               * No faces is not a failure: an expression pattern's volume.obj
+               * is a point cloud, vertices only, and the viewer draws it as
+               * one. Only an empty file is a failure.
+               */
+              return objGeometryToRawType(found.type.getId(), geometry);
+            });
+          }
+          return response.text().then(function (text) {
+            if (kind === 'obj') {
+              return objToRawType(found.type.getId(), text);
             }
-            /*
-             * No faces is not a failure: an expression pattern's volume.obj
-             * is a point cloud, vertices only, and the viewer draws it as
-             * one. Only an empty file is a failure.
-             */
-            return objGeometryToRawType(found.type.getId(), geometry);
+            var ref = that.visualTypeRef();
+            if (ref === null) {
+              throw new Error('no Visual type in the model to build SWC segments from');
+            }
+            return swcToRawType(found.type.getId(), text, ref);
           });
-        }
-        return response.text().then(function (text) {
-          if (kind === 'obj') {
-            return objToRawType(found.type.getId(), text);
-          }
-          var ref = that.visualTypeRef();
-          if (ref === null) {
-            throw new Error('no Visual type in the model to build SWC segments from');
-          }
-          return swcToRawType(found.type.getId(), text, ref);
         });
-      }).then(function (rawType) {
+      };
+
+      /*
+       * An OBJ can instead be fetched and parsed in a worker, so the parse is
+       * off the main thread and the page stays responsive while several
+       * meshes load. The worker does its own fetch and so misses the retry and
+       * host spreading the main thread applies -- any failure therefore falls
+       * back to the inline path rather than giving up, which also covers a
+       * browser or policy that will not start a worker at all.
+       */
+      var parsed = (kind === 'obj' && workerPool.enabled())
+        ? workerPool.parseObjInWorker(spreadUrl(url)).then(function (geometry) {
+          if (geometry.vertexCount === 0) {
+            throw new Error('no vertices parsed from ' + url);
+          }
+          return objGeometryToRawType(found.type.getId(), geometry);
+        }).catch(inline)
+        : inline();
+
+      parsed.then(function (rawType) {
         var rawModel = wrapResolvedType(that.modelShape(), found.library.getId(), rawType);
         GEPPETTO.Manager.swapResolvedType(rawModel);
         report(true, undefined, attemptsUsed);

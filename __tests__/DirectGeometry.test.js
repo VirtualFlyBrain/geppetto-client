@@ -543,3 +543,110 @@ test('a host that cannot be reached is dropped for the session', async () => {
   expect(RetryFetch.hostOf(RetryFetch.spreadUrl(url))).toBe('www.virtualflybrain.org');
   delete window.VFB_DATA_HOSTS;
 });
+
+/*
+ * Parsing in a worker. jsdom has no Worker, so these drive the pool with a
+ * stub: what matters is the contract around it -- that it is off unless asked
+ * for, that the pool bounds how many parse at once, that the parser shipped to
+ * the worker is the same one the main thread uses, and above all that every
+ * failure falls back to parsing inline rather than losing the mesh.
+ */
+const workerPool = require('@geppettoengine/geppetto-client/common/ObjWorkerPool');
+
+const withStubWorker = (behaviour) => {
+  const started = [];
+  global.Worker = function (url) {
+    const self = this;
+    started.push(url);
+    this.postMessage = (msg) => behaviour(self, msg, started.length);
+    this.terminate = () => null;
+    this.onmessage = null;
+    this.onerror = null;
+  };
+  global.Blob = function (parts) { this.parts = parts; };
+  global.URL.createObjectURL = () => 'blob:stub';
+  return started;
+};
+
+afterEach(() => {
+  workerPool.resetPool();
+  delete window.VFB_OBJ_WORKERS;
+});
+
+test('worker parsing is off unless it is asked for', () => {
+  withStubWorker(() => null);
+  delete window.VFB_OBJ_WORKERS;
+  expect(workerPool.enabled()).toBe(false);
+  window.VFB_OBJ_WORKERS = true;
+  expect(workerPool.enabled()).toBe(true);
+  window.VFB_OBJ_WORKERS = 3;
+  expect(workerPool.enabled()).toBe(true);
+});
+
+test('the worker is handed the same parser the main thread uses', () => {
+  withStubWorker(() => null);
+  window.VFB_OBJ_WORKERS = true;
+  let captured = null;
+  global.Blob = function (parts) { captured = parts.join(''); };
+  workerPool.parseObjInWorker('https://x/a.obj').catch(() => null);
+  // the parser is serialised in, not re-implemented
+  expect(captured).toContain('createObjParser');
+  expect(captured).toContain('positions[positionCount++]');
+  // and it carries its own helpers, so minification cannot break it
+  expect(captured).toContain('grownTo');
+  expect(captured).toContain('faceVertex');
+});
+
+test('a parsed mesh comes back as transferred typed arrays', async () => {
+  withStubWorker((worker) => {
+    const positions = new Float32Array([0, 0, 0, 1, 0, 0, 0, 1, 0]);
+    const indices = new Uint32Array([0, 1, 2]);
+    setTimeout(() => worker.onmessage({
+      data: { ok: true, positions, indices, vertexCount: 3, faceCount: 1 }
+    }), 0);
+  });
+  window.VFB_OBJ_WORKERS = true;
+  const geometry = await workerPool.parseObjInWorker('https://x/a.obj');
+  expect(geometry.vertexCount).toBe(3);
+  expect(geometry.faceCount).toBe(1);
+  expect(Array.from(geometry.indices)).toEqual([0, 1, 2]);
+});
+
+test('the pool bounds how many meshes parse at once, and queues the rest', async () => {
+  let live = 0;
+  let mostAtOnce = 0;
+  const finishers = [];
+  withStubWorker((worker) => {
+    live++;
+    mostAtOnce = Math.max(mostAtOnce, live);
+    finishers.push(() => {
+      live--;
+      worker.onmessage({ data: { ok: true, positions: new Float32Array(3), indices: new Uint32Array(0), vertexCount: 1, faceCount: 0 } });
+    });
+  });
+  window.VFB_OBJ_WORKERS = 2;
+  const all = [1, 2, 3, 4, 5].map(n => workerPool.parseObjInWorker('https://x/' + n + '.obj'));
+  // drain: each completion frees a worker, which lets a queued one start
+  for (let i = 0; i < 50; i++) {
+    await new Promise(r => setTimeout(r, 0));
+    while (finishers.length > 0) { finishers.shift()(); }
+  }
+  await Promise.all(all);
+  expect(mostAtOnce).toBeLessThanOrEqual(2);
+});
+
+test('a worker that fails hands the mesh back to the inline path', async () => {
+  withStubWorker((worker) => {
+    setTimeout(() => worker.onmessage({ data: { ok: false, message: 'boom' } }), 0);
+  });
+  window.VFB_OBJ_WORKERS = true;
+  await expect(workerPool.parseObjInWorker('https://x/a.obj')).rejects.toThrow('boom');
+});
+
+test('a worker that will not start rejects rather than throwing', async () => {
+  global.Worker = function () { throw new Error('workers blocked by policy'); };
+  global.Blob = function () { return null; };
+  global.URL.createObjectURL = () => 'blob:stub';
+  window.VFB_OBJ_WORKERS = true;
+  await expect(workerPool.parseObjInWorker('https://x/a.obj')).rejects.toThrow('workers blocked');
+});
