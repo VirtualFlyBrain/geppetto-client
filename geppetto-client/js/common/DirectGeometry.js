@@ -35,6 +35,8 @@ export function objToRawType (id, objText) {
   };
 }
 
+import { fetchWithRetry, failureReason, callTag } from './RetryFetch';
+
 /**
  * V8 cannot hold a string longer than this many characters, so an OBJ bigger
  * than it can never be read with response.text() -- the fetch succeeds and the
@@ -530,9 +532,17 @@ export default function DirectGeometry (GEPPETTO) {
       var kind = interpreterKind(found.type.getModelInterpreterId());
       var url = fetchUrl(found.type.getUrl(), window.location.protocol);
       var startedAt = Date.now();
-      var report = function (ok) {
+      var report = function (ok, failure, attempts) {
         try {
-          GEPPETTO.trigger('geppetto:direct_geometry', { kind: kind, ok: ok, ms: Date.now() - startedAt, path: path });
+          GEPPETTO.trigger('geppetto:direct_geometry', {
+            kind: kind,
+            ok: ok,
+            ms: Date.now() - startedAt,
+            path: path,
+            reason: ok ? undefined : ((failure && failure.reason) ? failure.reason : failureReason(failure)),
+            attempts: attempts,
+            call: ok ? undefined : callTag(url)
+          });
         } catch (ignore) {
           // reporting must never break resolution
         }
@@ -542,10 +552,10 @@ export default function DirectGeometry (GEPPETTO) {
        * so V8's string ceiling stops applying and the mesh is kept indexed
        * rather than expanded face by face. SWC is small and stays text.
        */
-      fetch(url).then(function (response) {
-        if (!response.ok) {
-          throw new Error('HTTP ' + response.status + ' fetching ' + url);
-        }
+      var attemptsUsed = 1;
+      fetchWithRetry(url).then(function (result) {
+        attemptsUsed = result.attempts;
+        var response = result.response;
         if (kind === 'obj' && response.body !== undefined && response.body !== null
           && typeof response.body.getReader === 'function' && typeof TextDecoder === 'function') {
           return readObjStream(response).then(function (geometry) {
@@ -573,11 +583,13 @@ export default function DirectGeometry (GEPPETTO) {
       }).then(function (rawType) {
         var rawModel = wrapResolvedType(that.modelShape(), found.library.getId(), rawType);
         GEPPETTO.Manager.swapResolvedType(rawModel);
-        report(true);
+        report(true, undefined, attemptsUsed);
         settle(true);
       }).catch(function (err) {
-        console.error('DirectGeometry - could not resolve ' + path + ' in the client, asking the server: ' + (err && err.message ? err.message : err));
-        report(false);
+        console.error('DirectGeometry - could not resolve ' + path + ' after '
+          + (err && err.attempts ? err.attempts : attemptsUsed) + ' attempt(s) ('
+          + failureReason(err) + '): ' + (err && err.message ? err.message : err));
+        report(false, err, (err && err.attempts) ? err.attempts : attemptsUsed);
         settle(false);
       });
     };

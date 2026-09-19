@@ -1,3 +1,5 @@
+import { fetchWithRetry, failureReason, callTag } from './RetryFetch';
+
 /**
  * Run a VFB term's queries in the client, without the server (VFB2 #502
  * phase 3).
@@ -127,17 +129,22 @@ export default function DirectQueries (GEPPETTO) {
   };
 
   var fetchJson = function (url) {
-    return fetch(url).then(function (response) {
-      if (!response.ok) {
-        throw new Error('HTTP ' + response.status + ' fetching ' + url);
-      }
-      return response.json();
+    return fetchWithRetry(url).then(function (result) {
+      return result.response.json();
     });
   };
 
-  var report = function (kind, ok, ms, queryId) {
+  var report = function (kind, ok, ms, queryId, failure) {
     try {
-      GEPPETTO.trigger('geppetto:direct_query', { kind: kind, ok: ok, ms: ms, query: queryId });
+      GEPPETTO.trigger('geppetto:direct_query', {
+        kind: kind,
+        ok: ok,
+        ms: ms,
+        query: queryId,
+        reason: ok ? undefined : ((failure && failure.reason) ? failure.reason : failureReason(failure)),
+        attempts: (failure && failure.attempts) ? failure.attempts : undefined,
+        call: ok ? undefined : ((failure && failure.url) ? callTag(failure.url) : queryId)
+      });
     } catch (ignore) {
       // reporting must never break a query
     }
@@ -162,8 +169,10 @@ export default function DirectQueries (GEPPETTO) {
       report('run', true, Date.now() - startedAt, queries[0].query.getId());
       callback(JSON.stringify(combined));
     }).catch(function (err) {
-      console.error('DirectQueries - could not run in the client, asking the server: ' + (err && err.message ? err.message : err));
-      report('run', false, Date.now() - startedAt, queries[0].query.getId());
+      console.error('DirectQueries - could not run in the client after '
+        + (err && err.attempts ? err.attempts : 1) + ' attempt(s) ('
+        + failureReason(err) + '), asking the server: ' + (err && err.message ? err.message : err));
+      report('run', false, Date.now() - startedAt, queries[0].query.getId(), err);
       fallback();
     });
   };
@@ -186,8 +195,10 @@ export default function DirectQueries (GEPPETTO) {
       report('count', true, Date.now() - startedAt, queries[0].query.getId());
       callback(counts.length === 1 ? counts[0] : Math.min.apply(null, counts));
     }).catch(function (err) {
-      console.error('DirectQueries - could not count in the client, asking the server: ' + (err && err.message ? err.message : err));
-      report('count', false, Date.now() - startedAt, queries[0].query.getId());
+      console.error('DirectQueries - could not count in the client after '
+        + (err && err.attempts ? err.attempts : 1) + ' attempt(s) ('
+        + failureReason(err) + '), asking the server: ' + (err && err.message ? err.message : err));
+      report('count', false, Date.now() - startedAt, queries[0].query.getId(), err);
       fallback();
     });
   };

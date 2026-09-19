@@ -1,3 +1,5 @@
+import { fetchWithRetry, failureReason, callTag } from './RetryFetch';
+
 /**
  * Fetch a VFB term's info in the client and build its model locally, without
  * the server (VFB2 #502 phase 2).
@@ -71,9 +73,16 @@ export default function DirectTermInfo (GEPPETTO) {
     var that = this;
     var datasource = this.findDatasource(datasourceId);
     var startedAt = Date.now();
-    var report = function (ok, id) {
+    var report = function (ok, id, failure, attempts) {
       try {
-        GEPPETTO.trigger('geppetto:direct_terminfo', { ok: ok, ms: Date.now() - startedAt, id: id });
+        GEPPETTO.trigger('geppetto:direct_terminfo', {
+          ok: ok,
+          ms: Date.now() - startedAt,
+          id: id,
+          reason: ok ? undefined : ((failure && failure.reason) ? failure.reason : failureReason(failure)),
+          attempts: attempts,
+          call: ok ? undefined : ((failure && failure.url) ? callTag(failure.url) : id)
+        });
       } catch (ignore) {
         // reporting must never break the load
       }
@@ -89,21 +98,22 @@ export default function DirectTermInfo (GEPPETTO) {
       }
       var id = variableIds[i];
       var url = that.termInfoUrl(datasource, id);
-      fetch(url).then(function (response) {
-        if (!response.ok) {
-          throw new Error('HTTP ' + response.status + ' fetching ' + url);
-        }
-        return response.json();
+      var attemptsUsed = 1;
+      fetchWithRetry(url).then(function (result) {
+        attemptsUsed = result.attempts;
+        return result.response.json();
       }).then(function (termInfo) {
         var shape = shapeOf(GEPPETTO.ModelFactory.geppettoModel);
         var built = termInfoToRawModel(termInfo, id, shape);
         GEPPETTO.Manager.addVariableToModel(built.rawModel);
         that.builtHere[id] = true;
-        report(true, id);
+        report(true, id, undefined, attemptsUsed);
         next(i + 1);
       }).catch(function (err) {
-        console.error('DirectTermInfo - could not build ' + id + ' in the client, asking the server: ' + (err && err.message ? err.message : err));
-        report(false, id);
+        console.error('DirectTermInfo - could not build ' + id + ' after '
+          + (err && err.attempts ? err.attempts : attemptsUsed) + ' attempt(s) ('
+          + failureReason(err) + '): ' + (err && err.message ? err.message : err));
+        report(false, id, err, (err && err.attempts) ? err.attempts : attemptsUsed);
         GEPPETTO.trigger('stop_spin_logo');
         fallback(variableIds.slice(i));
       });

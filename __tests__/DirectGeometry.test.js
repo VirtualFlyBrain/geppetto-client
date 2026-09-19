@@ -32,6 +32,11 @@ GEPPETTO.MessageSocket = { send: jest.fn(() => 'req-1') };
 GEPPETTO.CommandController = { log: () => null, createTags: () => null };
 GEPPETTO.DirectGeometry = new DirectGeometry(GEPPETTO);
 console.warn = () => null;
+/*
+ * A failed fetch is retried before anything falls back to the server. The
+ * tests want the retries, not the waiting between them.
+ */
+window.VFB_FETCH_BACKOFF_MS = [0, 0, 0];
 console.time = () => null;
 console.timeEnd = () => null;
 
@@ -286,4 +291,74 @@ test('a term the client built is not sent to the server, which never saw it', as
   // asking would come back as "Couldn't find a type for the path ..."
   expect(GEPPETTO.MessageSocket.send).not.toHaveBeenCalled();
   delete GEPPETTO.DirectTermInfo;
+});
+
+/*
+ * A single failure used to be the end of it: the client asked the server,
+ * which for these does nothing cleverer than fetch the same URL again, and
+ * for a term this client built cannot resolve it at all. Transient failures
+ * are retried here instead, and what finally went wrong is reported.
+ */
+test('a transient failure is retried and recovers without the server', async () => {
+  loadTerm();
+  let calls = 0;
+  global.fetch = jest.fn(() => {
+    calls++;
+    if (calls < 3) {
+      return Promise.resolve({ ok: false, status: 503 });
+    }
+    return Promise.resolve({ ok: true, text: () => Promise.resolve('1 1 0 0 0 1 -1\n2 0 1 0 0 2 1\n') });
+  });
+  delete window.location;
+  window.location = { protocol: 'https:' };
+  GEPPETTO.MessageSocket.send.mockClear();
+  events.length = 0;
+  GEPPETTO.DirectGeometry.enabled = true;
+  GEPPETTO.Manager.resolveImportType('SWCLibrary.VFB_jrmc2yzg_swc', () => null);
+  await new Promise(r => setTimeout(r, 50));
+  expect(calls).toBe(3);
+  expect(GEPPETTO.MessageSocket.send).not.toHaveBeenCalled();
+  const report = events.find(e => e[0] === 'geppetto:direct_geometry');
+  expect(report[1].ok).toBe(true);
+  expect(report[1].attempts).toBe(3);
+});
+
+test('a failure that survives the retries says why, and for which call', async () => {
+  loadTerm();
+  let calls = 0;
+  global.fetch = jest.fn(() => {
+    calls++;
+    return Promise.resolve({ ok: false, status: 503 });
+  });
+  delete window.location;
+  window.location = { protocol: 'https:' };
+  events.length = 0;
+  GEPPETTO.DirectGeometry.enabled = true;
+  GEPPETTO.Manager.resolveImportType('SWCLibrary.VFB_jrmc2yzg_swc', () => null);
+  await new Promise(r => setTimeout(r, 50));
+  expect(calls).toBe(4);
+  const report = events.find(e => e[0] === 'geppetto:direct_geometry');
+  expect(report[1].ok).toBe(false);
+  expect(report[1].reason).toBe('http503');
+  expect(report[1].attempts).toBe(4);
+  // the term the file belongs to, short enough for an event name
+  expect(report[1].call).toBe('jrmc2yzg');
+});
+
+test('a 404 is not retried: it will not come good', async () => {
+  loadTerm();
+  let calls = 0;
+  global.fetch = jest.fn(() => {
+    calls++;
+    return Promise.resolve({ ok: false, status: 404 });
+  });
+  delete window.location;
+  window.location = { protocol: 'https:' };
+  events.length = 0;
+  GEPPETTO.DirectGeometry.enabled = true;
+  GEPPETTO.Manager.resolveImportType('SWCLibrary.VFB_jrmc2yzg_swc', () => null);
+  await new Promise(r => setTimeout(r, 50));
+  expect(calls).toBe(1);
+  const report = events.find(e => e[0] === 'geppetto:direct_geometry');
+  expect(report[1].reason).toBe('http404');
 });

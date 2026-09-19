@@ -38,6 +38,11 @@ global.define = factory => {
 require('@geppettoengine/geppetto-client/geppettoModel/QueriesController');
 global.__amd(GEPPETTO);
 console.warn = () => null;
+/*
+ * A failed fetch is retried before anything falls back to the server. The
+ * tests want the retries, not the waiting between them.
+ */
+window.VFB_FETCH_BACKOFF_MS = [0, 0, 0];
 console.time = () => null;
 console.timeEnd = () => null;
 

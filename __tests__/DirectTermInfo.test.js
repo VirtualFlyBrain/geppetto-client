@@ -31,6 +31,11 @@ GEPPETTO.MessageSocket = { send: jest.fn(() => 'req-1') };
 GEPPETTO.CommandController = { log: () => null, createTags: () => null };
 GEPPETTO.DirectTermInfo = new DirectTermInfo(GEPPETTO);
 console.warn = () => null;
+/*
+ * A failed fetch is retried before anything falls back to the server. The
+ * tests want the retries, not the waiting between them.
+ */
+window.VFB_FETCH_BACKOFF_MS = [0, 0, 0];
 console.time = () => null;
 console.timeEnd = () => null;
 
