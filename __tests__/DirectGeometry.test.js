@@ -362,3 +362,81 @@ test('a 404 is not retried: it will not come good', async () => {
   const report = events.find(e => e[0] === 'geppetto:direct_geometry');
   expect(report[1].reason).toBe('http404');
 });
+
+/*
+ * VFB's ingress is several Rancher hosts behind one round-robin name. Naming
+ * them lets a session use one directly and spread the load; the cache is why
+ * it is per session rather than per request.
+ */
+const RetryFetch = require('@geppettoengine/geppetto-client/common/RetryFetch');
+
+test('data calls go to the published host until hosts are configured', () => {
+  RetryFetch.resetHosts();
+  delete window.VFB_DATA_HOSTS;
+  const url = 'https://www.virtualflybrain.org/data/VFB/i/jrmc/2yzg/VFB_00101567/volume.swc';
+  expect(RetryFetch.spreadUrl(url)).toBe(url);
+});
+
+test('a session picks one host and keeps it, and leaves other origins alone', () => {
+  RetryFetch.resetHosts();
+  window.VFB_DATA_HOSTS = 'buttermilk.inf.ed.ac.uk, parsley.inf.ed.ac.uk';
+  const url = 'https://www.virtualflybrain.org/data/VFB/i/jrmc/2yzg/VFB_00101567/volume.swc';
+  const first = RetryFetch.spreadUrl(url);
+  expect(['buttermilk.inf.ed.ac.uk', 'parsley.inf.ed.ac.uk']).toContain(RetryFetch.hostOf(first));
+  // same host for the rest of the session: these files are cached by URL
+  for (let i = 0; i < 10; i++) {
+    expect(RetryFetch.spreadUrl(url)).toBe(first);
+  }
+  // a query to the API is a different origin and is not spread
+  const api = 'https://v3-cached.virtualflybrain.org/run_query?id=X';
+  expect(RetryFetch.spreadUrl(api)).toBe(api);
+  delete window.VFB_DATA_HOSTS;
+});
+
+test('a page served from the apex spreads too, and the apex is never marked down', async () => {
+  RetryFetch.resetHosts();
+  window.VFB_DATA_HOSTS = 'buttermilk.virtualflybrain.org';
+  // no www: a page loaded on the apex builds its data URLs from that origin
+  const url = 'https://virtualflybrain.org/data/VFB/i/jrmc/2yzg/VFB_00101567/volume.swc';
+  expect(RetryFetch.hostOf(RetryFetch.spreadUrl(url))).toBe('buttermilk.virtualflybrain.org');
+
+  // the node is certless/unreachable: it drops out, the apex serves instead
+  const seen = [];
+  global.fetch = jest.fn((target) => {
+    seen.push(RetryFetch.hostOf(target));
+    if (RetryFetch.hostOf(target) === 'buttermilk.virtualflybrain.org') {
+      return Promise.reject(new TypeError('Failed to fetch'));
+    }
+    return Promise.resolve({ ok: true, text: () => Promise.resolve('') });
+  });
+  await RetryFetch.fetchWithRetry(url);
+  expect(seen[0]).toBe('buttermilk.virtualflybrain.org');
+  expect(seen[1]).toBe('virtualflybrain.org');
+
+  // a published origin must never be marked down: that would leave nothing to serve
+  RetryFetch.markHostDown('virtualflybrain.org');
+  RetryFetch.markHostDown('www.virtualflybrain.org');
+  expect(RetryFetch.hostOf(RetryFetch.spreadUrl(url))).toBe('virtualflybrain.org');
+  delete window.VFB_DATA_HOSTS;
+});
+
+test('a host that cannot be reached is dropped for the session', async () => {
+  RetryFetch.resetHosts();
+  window.VFB_DATA_HOSTS = 'buttermilk.inf.ed.ac.uk';
+  const url = 'https://www.virtualflybrain.org/data/VFB/i/jrmc/2yzg/VFB_00101567/volume.swc';
+  expect(RetryFetch.hostOf(RetryFetch.spreadUrl(url))).toBe('buttermilk.inf.ed.ac.uk');
+  const seen = [];
+  global.fetch = jest.fn((target) => {
+    seen.push(RetryFetch.hostOf(target));
+    if (RetryFetch.hostOf(target) === 'buttermilk.inf.ed.ac.uk') {
+      return Promise.reject(new TypeError('Failed to fetch'));
+    }
+    return Promise.resolve({ ok: true, text: () => Promise.resolve('') });
+  });
+  await RetryFetch.fetchWithRetry(url);
+  expect(seen[0]).toBe('buttermilk.inf.ed.ac.uk');
+  // nothing left to spread to, so it falls back to the published name
+  expect(seen[1]).toBe('www.virtualflybrain.org');
+  expect(RetryFetch.hostOf(RetryFetch.spreadUrl(url))).toBe('www.virtualflybrain.org');
+  delete window.VFB_DATA_HOSTS;
+});

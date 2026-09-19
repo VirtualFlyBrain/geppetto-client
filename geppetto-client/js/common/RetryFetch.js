@@ -36,6 +36,155 @@ function backoff (index) {
   return waits[Math.min(index, waits.length - 1)];
 }
 
+/*
+ * VFB's ingress is several Rancher hosts behind one round-robin name, so a
+ * browser talks to whichever address it resolved and keeps that connection
+ * for the origin. Naming the hosts directly lets a session use one of them
+ * and spread the load across the rest -- worth doing for the meshes, which
+ * are the only sizeable transfers.
+ *
+ * Per session, not per request: these files come back immutable and the
+ * browser caches by URL, so asking a different host each time would make a
+ * returning visitor download what they already have.
+ *
+ * Off until window.VFB_DATA_HOSTS names some hosts. Names only -- an address
+ * would pin us to a host that DNS has since dropped, and the certificate is
+ * issued for names.
+ */
+var session = { host: undefined, down: {} };
+
+/*
+ * A host may carry a weight, "host*n", for how much of the load it should
+ * take: VFB's hosts are not equal -- vfbk8s10 has a 10Gb link where the
+ * others have 1Gb -- so an even split would waste the fast one. No weight
+ * means 1.
+ */
+function configuredHosts () {
+  var configured = (typeof window !== 'undefined') ? window.VFB_DATA_HOSTS : undefined;
+  if (typeof configured === 'string') {
+    configured = configured.split(',');
+  }
+  if (!configured || !configured.length) {
+    return [];
+  }
+  return configured.map(function (entry) {
+    var parts = String(entry).trim().split('*');
+    var weight = parseInt(parts[1], 10);
+    return { host: parts[0].trim(), weight: (isNaN(weight) || weight < 1) ? 1 : weight };
+  }).filter(function (entry) {
+    return entry.host.length > 0;
+  });
+}
+
+/*
+ * Only the origins the data is published under are spread; everything else is
+ * left alone. There is more than one: VFB is served from both the apex and
+ * www, and a page loaded on either builds its URLs from the origin it is on.
+ */
+function spreadableHosts () {
+  var configured = (typeof window !== 'undefined') ? window.VFB_DATA_HOST : undefined;
+  if (typeof configured === 'string') {
+    configured = configured.split(',');
+  }
+  if (!configured || !configured.length) {
+    configured = ['www.virtualflybrain.org', 'virtualflybrain.org'];
+  }
+  return configured.map(function (host) {
+    return String(host).trim();
+  }).filter(function (host) {
+    return host.length > 0;
+  });
+}
+
+/* The name to fall back to when no alternative host is usable. */
+function publishedHost () {
+  return spreadableHosts()[0];
+}
+
+/**
+ * The host this session uses, chosen once from the ones that are up. Falls
+ * back to the published name when every alternative has failed.
+ */
+export function sessionHost () {
+  var hosts = configuredHosts().filter(function (entry) {
+    return session.down[entry.host] !== true;
+  });
+  if (!hosts.length) {
+    session.host = undefined;
+    return publishedHost();
+  }
+  var stillUp = hosts.filter(function (entry) {
+    return entry.host === session.host;
+  });
+  if (stillUp.length > 0) {
+    return session.host;
+  }
+  var total = hosts.reduce(function (sum, entry) {
+    return sum + entry.weight;
+  }, 0);
+  var pick = Math.random() * total;
+  for (var i = 0; i < hosts.length; i++) {
+    pick -= hosts[i].weight;
+    if (pick < 0) {
+      session.host = hosts[i].host;
+      return session.host;
+    }
+  }
+  session.host = hosts[hosts.length - 1].host;
+  return session.host;
+}
+
+/** This host is not answering: nothing else in this session should use it. */
+export function markHostDown (host) {
+  if (host && spreadableHosts().indexOf(host) === -1 && session.down[host] !== true) {
+    session.down[host] = true;
+    try {
+      GEPPETTO.trigger('geppetto:data_host_down', { host: host });
+    } catch (ignore) {
+      // reporting must never break a load
+    }
+  }
+  if (session.host === host) {
+    session.host = undefined;
+  }
+}
+
+/** For tests, and for a session that wants to start over. */
+export function resetHosts () {
+  session = { host: undefined, down: {} };
+}
+
+/** The same URL, asked of this session's host. */
+export function spreadUrl (url) {
+  var hosts = configuredHosts();
+  if (!hosts.length || !url) {
+    return url;
+  }
+  var text = String(url);
+  var published = spreadableHosts();
+  var host = sessionHost();
+  /*
+   * Nothing left to spread to: leave the URL on whichever published origin
+   * the page is already using, rather than moving it to another one.
+   */
+  if (published.indexOf(host) > -1) {
+    return url;
+  }
+  for (var i = 0; i < published.length; i++) {
+    var origin = '//' + published[i] + '/';
+    if (text.indexOf(origin) > -1) {
+      return text.replace(origin, '//' + host + '/');
+    }
+  }
+  return url;
+}
+
+/** Which host a URL is addressed to, for reporting and for marking it down. */
+export function hostOf (url) {
+  var match = String(url || '').match(/\/\/([^/]+)\//);
+  return match === null ? '' : match[1];
+}
+
 /**
  * Why a fetch failed, as a short token for an event name.
  *
@@ -108,13 +257,26 @@ export function fetchWithRetry (url, attempts) {
      * address by itself.
      */
     var first = (tried === 1);
-    var target = first ? url : (url + (url.indexOf('?') > -1 ? '&' : '?') + '_retry=' + tried);
+    /*
+     * Each attempt re-picks the session's host, so once one is marked down
+     * the retry goes to another without the caller knowing anything about it.
+     */
+    var addressed = spreadUrl(url);
+    var target = first ? addressed : (addressed + (addressed.indexOf('?') > -1 ? '&' : '?') + '_retry=' + tried);
     return (first ? fetch(target) : fetch(target, { cache: 'reload' })).then(function (response) {
       if (response.ok) {
         return { response: response, attempts: tried };
       }
       return Promise.reject({ status: response.status, message: 'HTTP ' + response.status + ' fetching ' + target });
     }).catch(function (failure) {
+      /*
+       * A host that cannot be reached at all is out for this session: it is
+       * the case DNS would have routed around, and nothing else should keep
+       * paying for it. An HTTP error is the host answering, so it stays.
+       */
+      if (failureReason(failure) === 'network') {
+        markHostDown(hostOf(target));
+      }
       if (tried < limit && worthRetrying(failure)) {
         return wait(backoff(tried - 1)).then(attempt);
       }
@@ -122,6 +284,7 @@ export function fetchWithRetry (url, attempts) {
       err.reason = failureReason(failure);
       err.attempts = tried;
       err.url = url;
+      err.host = hostOf(target);
       throw err;
     });
   };
