@@ -393,6 +393,28 @@ test('a session picks one host and keeps it, and leaves other origins alone', ()
   delete window.VFB_DATA_HOSTS;
 });
 
+test('an aborted call is not retried and keeps its name, so callers can tell a cancel from a failure', async () => {
+  RetryFetch.resetHosts();
+  delete window.VFB_DATA_HOSTS;
+  const url = 'https://v3-cached.virtualflybrain.org/get_term_info?id=VFB_00101567';
+  const abort = new Error('The user aborted a request.');
+  abort.name = 'AbortError';
+  global.fetch = jest.fn(() => Promise.reject(abort));
+  let caught = null;
+  try {
+    await RetryFetch.fetchWithRetry(url, undefined, { signal: {} });
+  } catch (e) {
+    caught = e;
+  }
+  expect(caught).not.toBeNull();
+  expect(caught.name).toBe('AbortError');
+  expect(caught.reason).toBe('aborted');
+  expect(caught.attempts).toBe(1);        // never retried
+  expect(global.fetch).toHaveBeenCalledTimes(1);
+  // the caller's options are carried through
+  expect(global.fetch.mock.calls[0][1]).toEqual({ signal: {} });
+});
+
 test('a page served from the apex spreads too, and the apex is never marked down', async () => {
   RetryFetch.resetHosts();
   window.VFB_DATA_HOSTS = 'buttermilk.virtualflybrain.org';

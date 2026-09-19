@@ -229,6 +229,20 @@ function worthRetrying (failure) {
   return true;
 }
 
+/* The caller's fetch options plus our cache directive, without mutating theirs. */
+function withReloadCache (init) {
+  var options = { cache: 'reload' };
+  if (init) {
+    for (var key in init) {
+      if (Object.prototype.hasOwnProperty.call(init, key)) {
+        options[key] = init[key];
+      }
+    }
+    options.cache = 'reload';
+  }
+  return options;
+}
+
 function wait (ms) {
   return new Promise(function (resolve) {
     setTimeout(resolve, ms);
@@ -238,10 +252,12 @@ function wait (ms) {
 /**
  * fetch(url), retried on anything transient.
  *
+ * @param init - optional fetch options, for a caller that needs them (an
+ *               AbortController signal, say). An abort is never retried.
  * @returns a promise for {response, attempts}; rejects with an error carrying
  *          .reason, .attempts and .url once the attempts are spent.
  */
-export function fetchWithRetry (url, attempts) {
+export function fetchWithRetry (url, attempts, init) {
   var limit = attemptLimit(attempts);
   var tried = 0;
   var attempt = function () {
@@ -263,7 +279,12 @@ export function fetchWithRetry (url, attempts) {
      */
     var addressed = spreadUrl(url);
     var target = first ? addressed : (addressed + (addressed.indexOf('?') > -1 ? '&' : '?') + '_retry=' + tried);
-    return (first ? fetch(target) : fetch(target, { cache: 'reload' })).then(function (response) {
+    /*
+     * The caller's own options are carried through every attempt, so a signal
+     * still aborts a retry; only the cache directive is ours to add.
+     */
+    var options = first ? init : withReloadCache(init);
+    return (options ? fetch(target, options) : fetch(target)).then(function (response) {
       if (response.ok) {
         return { response: response, attempts: tried };
       }
@@ -281,6 +302,14 @@ export function fetchWithRetry (url, attempts) {
         return wait(backoff(tried - 1)).then(attempt);
       }
       var err = new Error((failure && failure.message) ? failure.message : String(failure));
+      /*
+       * Keep the original name: callers distinguish an abort from a failure by
+       * it (an aborted call is a cancel, not something to report to the user),
+       * and rewrapping used to lose that.
+       */
+      if (failure && failure.name) {
+        err.name = failure.name;
+      }
       err.reason = failureReason(failure);
       err.attempts = tried;
       err.url = url;
