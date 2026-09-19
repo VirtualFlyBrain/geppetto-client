@@ -650,3 +650,40 @@ test('a worker that will not start rejects rather than throwing', async () => {
   window.VFB_OBJ_WORKERS = true;
   await expect(workerPool.parseObjInWorker('https://x/a.obj')).rejects.toThrow('workers blocked');
 });
+
+test('a parsed mesh carries its own normals, so the viewer need not recompute them', () => {
+  const parser = DirectGeometryModule.createObjParser();
+  // a single triangle in the z=0 plane: its normal is the z axis
+  parser.push('v 0 0 0\nv 1 0 0\nv 0 1 0\nf 1 2 3\n');
+  const geometry = parser.finish();
+  expect(geometry.faceCount).toBe(1);
+  expect(geometry.normals).not.toBeNull();
+  expect(geometry.normals.length).toBe(9);
+  for (let v = 0; v < 3; v++) {
+    expect(geometry.normals[v * 3]).toBeCloseTo(0, 5);
+    expect(geometry.normals[v * 3 + 1]).toBeCloseTo(0, 5);
+    expect(Math.abs(geometry.normals[v * 3 + 2])).toBeCloseTo(1, 5);
+  }
+});
+
+test('a point cloud gets no normals rather than a zero-filled array', () => {
+  const parser = DirectGeometryModule.createObjParser();
+  parser.push('v 0 0 0\nv 1 1 1\n');          // vertices, no faces
+  const geometry = parser.finish();
+  expect(geometry.faceCount).toBe(0);
+  expect(geometry.normals).toBeNull();
+});
+
+test('normals average across the faces a vertex belongs to', () => {
+  const parser = DirectGeometryModule.createObjParser();
+  // two triangles meeting along an edge, folded about it
+  parser.push('v 0 0 0\nv 1 0 0\nv 0 1 0\nv 0 0 1\nf 1 2 3\nf 1 4 2\n');
+  const geometry = parser.finish();
+  // every normal is unit length
+  for (let v = 0; v < geometry.vertexCount; v++) {
+    const x = geometry.normals[v * 3];
+    const y = geometry.normals[v * 3 + 1];
+    const z = geometry.normals[v * 3 + 2];
+    expect(Math.sqrt(x * x + y * y + z * z)).toBeCloseTo(1, 5);
+  }
+});

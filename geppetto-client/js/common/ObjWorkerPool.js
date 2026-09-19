@@ -93,13 +93,17 @@ function workerSource () {
      */
     '    var positions = new Float32Array(geometry.positions);',
     '    var indices = new Uint32Array(geometry.indices);',
+    '    var normals = geometry.normals === null ? null : new Float32Array(geometry.normals);',
+    '    var moved = [positions.buffer, indices.buffer];',
+    '    if (normals !== null) { moved.push(normals.buffer); }',
     '    self.postMessage({',
     '      ok: true,',
     '      positions: positions,',
     '      indices: indices,',
+    '      normals: normals,',
     '      vertexCount: geometry.vertexCount,',
     '      faceCount: geometry.faceCount',
-    '    }, [positions.buffer, indices.buffer]);',
+    '    }, moved);',
     '  }).catch(function (err) {',
     '    self.postMessage({ ok: false, message: String(err && err.message ? err.message : err) });',
     '  });',
@@ -190,6 +194,7 @@ export function parseObjInWorker (url) {
           done(resolve, {
             positions: e.data.positions,
             indices: e.data.indices,
+            normals: e.data.normals,
             vertexCount: e.data.vertexCount,
             faceCount: e.data.faceCount
           });

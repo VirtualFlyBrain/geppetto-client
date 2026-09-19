@@ -61,6 +61,56 @@ export var MAX_OBJ_TEXT = 536870888;
  * vertices are triangulated as a fan.
  */
 export function createObjParser () {
+  /*
+   * Per-vertex normals, accumulated face by face and normalised.
+   *
+   * The viewer used to get these from THREE's computeVertexNormals, which
+   * allocates three Vector3 objects per face -- millions of short-lived
+   * objects for one VFB mesh, all on the main thread while the user waits.
+   * The same arithmetic straight into a typed array allocates nothing, and
+   * when the parse runs in a worker it costs the main thread nothing at all.
+   *
+   * A mesh with no faces (an expression pattern's point cloud) has no normals
+   * to compute and gets none: the viewer draws those as points.
+   */
+  var vertexNormals = function (pos, posCount, idx, idxCount) {
+    if (idxCount === 0) {
+      return null;
+    }
+    var normals = new Float32Array(posCount);
+    var i;
+    for (i = 0; i < idxCount; i += 3) {
+      var a = idx[i] * 3;
+      var b = idx[i + 1] * 3;
+      var c = idx[i + 2] * 3;
+      var abx = pos[b] - pos[a];
+      var aby = pos[b + 1] - pos[a + 1];
+      var abz = pos[b + 2] - pos[a + 2];
+      var acx = pos[c] - pos[a];
+      var acy = pos[c + 1] - pos[a + 1];
+      var acz = pos[c + 2] - pos[a + 2];
+      /* The face normal, as the cross product, weighted by face area. */
+      var nx = aby * acz - abz * acy;
+      var ny = abz * acx - abx * acz;
+      var nz = abx * acy - aby * acx;
+      normals[a] += nx; normals[a + 1] += ny; normals[a + 2] += nz;
+      normals[b] += nx; normals[b + 1] += ny; normals[b + 2] += nz;
+      normals[c] += nx; normals[c + 1] += ny; normals[c + 2] += nz;
+    }
+    for (i = 0; i < posCount; i += 3) {
+      var x = normals[i];
+      var y = normals[i + 1];
+      var z = normals[i + 2];
+      var length = Math.sqrt(x * x + y * y + z * z);
+      if (length > 0) {
+        normals[i] = x / length;
+        normals[i + 1] = y / length;
+        normals[i + 2] = z / length;
+      }
+    }
+    return normals;
+  };
+
   function grownTo (array, needed) {
     if (needed <= array.length) {
       return array;
@@ -159,6 +209,7 @@ export function createObjParser () {
       return {
         positions: positions.subarray(0, positionCount),
         indices: indices.subarray(0, indexCount),
+        normals: vertexNormals(positions, positionCount, indices, indexCount),
         vertexCount: positionCount / 3,
         faceCount: indexCount / 3
       };
@@ -183,7 +234,11 @@ export function objGeometryToRawType (id, geometry) {
     defaultValue: {
       eClass: 'OBJ',
       obj: '',
-      objGeometry: { positions: geometry.positions, indices: geometry.indices }
+      objGeometry: {
+        positions: geometry.positions,
+        indices: geometry.indices,
+        normals: geometry.normals
+      }
     }
   };
 }
