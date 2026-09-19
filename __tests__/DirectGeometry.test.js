@@ -377,19 +377,60 @@ test('data calls go to the published host until hosts are configured', () => {
   expect(RetryFetch.spreadUrl(url)).toBe(url);
 });
 
-test('a session picks one host and keeps it, and leaves other origins alone', () => {
+test('a file always comes from the same host, and a batch of files spreads across them', () => {
   RetryFetch.resetHosts();
-  window.VFB_DATA_HOSTS = 'buttermilk.inf.ed.ac.uk, parsley.inf.ed.ac.uk';
-  const url = 'https://www.virtualflybrain.org/data/VFB/i/jrmc/2yzg/VFB_00101567/volume.swc';
-  const first = RetryFetch.spreadUrl(url);
-  expect(['buttermilk.inf.ed.ac.uk', 'parsley.inf.ed.ac.uk']).toContain(RetryFetch.hostOf(first));
-  // same host for the rest of the session: these files are cached by URL
+  const nodes = ['buttermilk', 'parsley', 'sourcream', 'chive', 'mayo', 'dill', 'cayenne']
+    .map(n => n + '.virtualflybrain.org');
+  window.VFB_DATA_HOSTS = nodes.join(',');
+  const fileUrl = n => 'https://www.virtualflybrain.org/data/VFB/i/jrmc/' + n + '/volume.obj';
+
+  // stable: the same file maps to the same host every time, so the cache still hits
+  const one = RetryFetch.spreadUrl(fileUrl('2yzg'));
+  expect(nodes).toContain(RetryFetch.hostOf(one));
   for (let i = 0; i < 10; i++) {
-    expect(RetryFetch.spreadUrl(url)).toBe(first);
+    expect(RetryFetch.spreadUrl(fileUrl('2yzg'))).toBe(one);
   }
+  // and the choice does not depend on which published origin the page is on
+  expect(RetryFetch.hostOf(RetryFetch.spreadUrl('https://virtualflybrain.org/data/VFB/i/jrmc/2yzg/volume.obj')))
+    .toBe(RetryFetch.hostOf(one));
+
+  // spread: many different files do not all land on one node
+  const used = new Set();
+  for (let i = 0; i < 60; i++) {
+    used.add(RetryFetch.hostOf(RetryFetch.spreadUrl(fileUrl('f' + i))));
+  }
+  expect(used.size).toBeGreaterThan(1);
+
   // a query to the API is a different origin and is not spread
   const api = 'https://v3-cached.virtualflybrain.org/run_query?id=X';
   expect(RetryFetch.spreadUrl(api)).toBe(api);
+  delete window.VFB_DATA_HOSTS;
+});
+
+test('a weighted host takes a larger share, and a host going down moves only its own files', () => {
+  RetryFetch.resetHosts();
+  window.VFB_DATA_HOSTS = 'buttermilk.virtualflybrain.org,vfbk8s10.virtualflybrain.org*10';
+  const fileUrl = n => 'https://www.virtualflybrain.org/data/VFB/i/jrmc/' + n + '/volume.obj';
+  const before = {};
+  let fast = 0;
+  for (let i = 0; i < 110; i++) {
+    const h = RetryFetch.hostOf(RetryFetch.spreadUrl(fileUrl('f' + i)));
+    before['f' + i] = h;
+    if (h === 'vfbk8s10.virtualflybrain.org') { fast++; }
+  }
+  // ten slots against one: the fast host should carry most of them
+  expect(fast).toBeGreaterThan(55);
+
+  // only the files that were on the downed host move; the rest keep their cached host
+  RetryFetch.markHostDown('buttermilk.virtualflybrain.org');
+  let moved = 0;
+  let stayed = 0;
+  for (let i = 0; i < 110; i++) {
+    const h = RetryFetch.hostOf(RetryFetch.spreadUrl(fileUrl('f' + i)));
+    if (h === before['f' + i]) { stayed++; } else { moved++; }
+  }
+  expect(stayed).toBe(fast);
+  expect(moved).toBe(110 - fast);
   delete window.VFB_DATA_HOSTS;
 });
 

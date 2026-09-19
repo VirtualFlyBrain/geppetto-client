@@ -51,7 +51,7 @@ function backoff (index) {
  * would pin us to a host that DNS has since dropped, and the certificate is
  * issued for names.
  */
-var session = { host: undefined, down: {} };
+var session = { down: {} };
 
 /*
  * A host may carry a weight, "host*n", for how much of the load it should
@@ -101,37 +101,64 @@ function publishedHost () {
   return spreadableHosts()[0];
 }
 
-/**
- * The host this session uses, chosen once from the ones that are up. Falls
- * back to the published name when every alternative has failed.
+/*
+ * The file's path, which is what the host is chosen from: the same file must
+ * come from the same host whichever published origin the page is on, and
+ * whatever query a retry has appended.
  */
-export function sessionHost () {
-  var hosts = configuredHosts().filter(function (entry) {
-    return session.down[entry.host] !== true;
-  });
-  if (!hosts.length) {
-    session.host = undefined;
-    return publishedHost();
+function pathKey (url) {
+  var withoutQuery = String(url || '').split('?')[0];
+  var afterHost = withoutQuery.split('//')[1];
+  return (afterHost === undefined) ? withoutQuery : afterHost.substring(afterHost.indexOf('/') + 1);
+}
+
+/* FNV-1a, for a cheap stable spread. Any stable hash would do. */
+function hashOf (text) {
+  var hash = 2166136261;
+  for (var i = 0; i < text.length; i++) {
+    hash = hash ^ text.charCodeAt(i);
+    hash = (hash + (hash << 1) + (hash << 4) + (hash << 7) + (hash << 8) + (hash << 24)) >>> 0;
   }
-  var stillUp = hosts.filter(function (entry) {
-    return entry.host === session.host;
-  });
-  if (stillUp.length > 0) {
-    return session.host;
-  }
-  var total = hosts.reduce(function (sum, entry) {
-    return sum + entry.weight;
-  }, 0);
-  var pick = Math.random() * total;
+  return hash >>> 0;
+}
+
+/* One slot per unit of weight, so a 10Gb host takes ten times the share. */
+function hostSlots (hosts) {
+  var slots = [];
   for (var i = 0; i < hosts.length; i++) {
-    pick -= hosts[i].weight;
-    if (pick < 0) {
-      session.host = hosts[i].host;
-      return session.host;
+    for (var w = 0; w < hosts[i].weight; w++) {
+      slots.push(hosts[i].host);
     }
   }
-  session.host = hosts[hosts.length - 1].host;
-  return session.host;
+  return slots;
+}
+
+/**
+ * The host a given file comes from, chosen by its path rather than once per
+ * session.
+ *
+ * Per session would mean every file in a page load queues on one node, which
+ * is no help at all for the case worth helping: several meshes loading at
+ * once. Choosing by path spreads a batch of different files across the nodes
+ * while keeping each file on one host, so the browser's cache still hits on a
+ * revisit -- which is what the per-session choice was protecting.
+ *
+ * A host that is down is stepped over rather than removed, so only its own
+ * files move; everything else keeps the host it already cached from.
+ */
+export function hostFor (url) {
+  var slots = hostSlots(configuredHosts());
+  if (!slots.length) {
+    return publishedHost();
+  }
+  var start = hashOf(pathKey(url)) % slots.length;
+  for (var probe = 0; probe < slots.length; probe++) {
+    var candidate = slots[(start + probe) % slots.length];
+    if (session.down[candidate] !== true) {
+      return candidate;
+    }
+  }
+  return publishedHost();
 }
 
 /** This host is not answering: nothing else in this session should use it. */
@@ -144,14 +171,11 @@ export function markHostDown (host) {
       // reporting must never break a load
     }
   }
-  if (session.host === host) {
-    session.host = undefined;
-  }
 }
 
 /** For tests, and for a session that wants to start over. */
 export function resetHosts () {
-  session = { host: undefined, down: {} };
+  session = { down: {} };
 }
 
 /** The same URL, asked of this session's host. */
@@ -162,7 +186,7 @@ export function spreadUrl (url) {
   }
   var text = String(url);
   var published = spreadableHosts();
-  var host = sessionHost();
+  var host = hostFor(url);
   /*
    * Nothing left to spread to: leave the URL on whichever published origin
    * the page is already using, rather than moving it to another one.
