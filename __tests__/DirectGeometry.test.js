@@ -37,6 +37,20 @@ console.warn = () => null;
  * tests want the retries, not the waiting between them.
  */
 window.VFB_FETCH_BACKOFF_MS = [0, 0, 0];
+
+/*
+ * Wait for the outcome, not for a guessed number of milliseconds. Even with
+ * the backoff zeroed, four attempts are four turns of the timer queue, which
+ * under a loaded runner can take longer than a fixed 10ms -- that made these
+ * tests fail about one run in ten for no reason of their own.
+ */
+const settle = async (check, budgetMs = 2000) => {
+  const deadline = Date.now() + budgetMs;
+  while (Date.now() < deadline) {
+    if (check()) { return; }
+    await new Promise(r => setTimeout(r, 5));
+  }
+};
 console.time = () => null;
 console.timeEnd = () => null;
 
@@ -159,7 +173,7 @@ test('a failed fetch falls back to the server and reports it', async () => {
   GEPPETTO.DirectGeometry.enabled = true;
   const cb = () => null;
   GEPPETTO.Manager.resolveImportType('SWCLibrary.VFB_jrmc2yzg_swc', cb);
-  await new Promise(r => setTimeout(r, 10));
+  await settle(() => GEPPETTO.MessageSocket.send.mock.calls.length > 0);
   expect(GEPPETTO.MessageSocket.send).toHaveBeenCalledWith('resolve_import_type', expect.objectContaining({ paths: ['SWCLibrary.VFB_jrmc2yzg_swc'] }), cb);
   expect(typeAt('SWCLibrary', 'VFB_jrmc2yzg_swc').getMetaType()).toBe('ImportType');
   const report = events.find(e => e[0] === 'geppetto:direct_geometry');
@@ -287,7 +301,7 @@ test('a term the client built is not sent to the server, which never saw it', as
   GEPPETTO.MessageSocket.send.mockClear();
   GEPPETTO.DirectGeometry.enabled = true;
   GEPPETTO.Manager.resolveImportType('SWCLibrary.VFB_jrmc2yzg_swc', () => null);
-  await new Promise(r => setTimeout(r, 10));
+  await new Promise(r => setTimeout(r, 300));
   // asking would come back as "Couldn't find a type for the path ..."
   expect(GEPPETTO.MessageSocket.send).not.toHaveBeenCalled();
   delete GEPPETTO.DirectTermInfo;
@@ -315,7 +329,7 @@ test('a transient failure is retried and recovers without the server', async () 
   events.length = 0;
   GEPPETTO.DirectGeometry.enabled = true;
   GEPPETTO.Manager.resolveImportType('SWCLibrary.VFB_jrmc2yzg_swc', () => null);
-  await new Promise(r => setTimeout(r, 50));
+  await settle(() => calls >= 3);
   expect(calls).toBe(3);
   expect(GEPPETTO.MessageSocket.send).not.toHaveBeenCalled();
   const report = events.find(e => e[0] === 'geppetto:direct_geometry');
@@ -335,7 +349,7 @@ test('a failure that survives the retries says why, and for which call', async (
   events.length = 0;
   GEPPETTO.DirectGeometry.enabled = true;
   GEPPETTO.Manager.resolveImportType('SWCLibrary.VFB_jrmc2yzg_swc', () => null);
-  await new Promise(r => setTimeout(r, 50));
+  await new Promise(r => setTimeout(r, 300));
   expect(calls).toBe(4);
   const report = events.find(e => e[0] === 'geppetto:direct_geometry');
   expect(report[1].ok).toBe(false);
@@ -357,7 +371,7 @@ test('a 404 is not retried: it will not come good', async () => {
   events.length = 0;
   GEPPETTO.DirectGeometry.enabled = true;
   GEPPETTO.Manager.resolveImportType('SWCLibrary.VFB_jrmc2yzg_swc', () => null);
-  await new Promise(r => setTimeout(r, 50));
+  await new Promise(r => setTimeout(r, 300));
   expect(calls).toBe(1);
   const report = events.find(e => e[0] === 'geppetto:direct_geometry');
   expect(report[1].reason).toBe('http404');
@@ -480,6 +494,32 @@ test('a page served from the apex spreads too, and the apex is never marked down
   RetryFetch.markHostDown('virtualflybrain.org');
   RetryFetch.markHostDown('www.virtualflybrain.org');
   expect(RetryFetch.hostOf(RetryFetch.spreadUrl(url))).toBe('virtualflybrain.org');
+  delete window.VFB_DATA_HOSTS;
+});
+
+test('a retry asks a different host, even when the first one merely errored', async () => {
+  RetryFetch.resetHosts();
+  const nodes = ['buttermilk', 'parsley', 'sourcream', 'chive']
+    .map(n => n + '.virtualflybrain.org');
+  window.VFB_DATA_HOSTS = nodes.join(',');
+  const url = 'https://www.virtualflybrain.org/data/VFB/i/jrmc/2yzg/VFB_00101567/volume.obj';
+
+  // 503 means the host answered, so it is not marked down -- but asking it
+  // again is the least useful thing we could do
+  const seen = [];
+  global.fetch = jest.fn((target) => {
+    seen.push(RetryFetch.hostOf(target));
+    return seen.length < 3
+      ? Promise.resolve({ ok: false, status: 503 })
+      : Promise.resolve({ ok: true, text: () => Promise.resolve('') });
+  });
+  const result = await RetryFetch.fetchWithRetry(url);
+  expect(result.attempts).toBe(3);
+  expect(new Set(seen).size).toBe(3);          // three attempts, three hosts
+  seen.forEach(h => expect(nodes).toContain(h));
+
+  // and the first attempt is still the file's stable host, so the cache holds
+  expect(seen[0]).toBe(RetryFetch.hostOf(RetryFetch.spreadUrl(url)));
   delete window.VFB_DATA_HOSTS;
 });
 

@@ -145,17 +145,45 @@ function hostSlots (hosts) {
  *
  * A host that is down is stepped over rather than removed, so only its own
  * files move; everything else keeps the host it already cached from.
+ *
+ * @param skip - how many hosts to step past, for a retry. A host that just
+ *               failed to serve this file should not be asked again: an HTTP
+ *               error means it answered, so it is not marked down, but it is
+ *               still the least promising place to ask next. Attempt one
+ *               always passes 0, so the cache-stable choice is the one that
+ *               normally serves.
  */
-export function hostFor (url) {
+export function hostFor (url, skip) {
   var slots = hostSlots(configuredHosts());
   if (!slots.length) {
     return publishedHost();
   }
+  var distinct = [];
+  for (var s = 0; s < slots.length; s++) {
+    if (distinct.indexOf(slots[s]) === -1) {
+      distinct.push(slots[s]);
+    }
+  }
   var start = hashOf(pathKey(url)) % slots.length;
+  var stepped = 0;
+  var wanted = (skip > 0) ? (skip % distinct.length) : 0;
+  var seen = [];
   for (var probe = 0; probe < slots.length; probe++) {
     var candidate = slots[(start + probe) % slots.length];
-    if (session.down[candidate] !== true) {
+    if (session.down[candidate] === true || seen.indexOf(candidate) > -1) {
+      continue;
+    }
+    if (stepped === wanted) {
       return candidate;
+    }
+    seen.push(candidate);
+    stepped++;
+  }
+  /* Stepped past everything usable: start again from the file's own host. */
+  for (var again = 0; again < slots.length; again++) {
+    var fallback = slots[(start + again) % slots.length];
+    if (session.down[fallback] !== true) {
+      return fallback;
     }
   }
   return publishedHost();
@@ -179,14 +207,14 @@ export function resetHosts () {
 }
 
 /** The same URL, asked of this session's host. */
-export function spreadUrl (url) {
+export function spreadUrl (url, skip) {
   var hosts = configuredHosts();
   if (!hosts.length || !url) {
     return url;
   }
   var text = String(url);
   var published = spreadableHosts();
-  var host = hostFor(url);
+  var host = hostFor(url, skip);
   /*
    * Nothing left to spread to: leave the URL on whichever published origin
    * the page is already using, rather than moving it to another one.
@@ -298,10 +326,11 @@ export function fetchWithRetry (url, attempts, init) {
      */
     var first = (tried === 1);
     /*
-     * Each attempt re-picks the session's host, so once one is marked down
-     * the retry goes to another without the caller knowing anything about it.
+     * Each retry steps to the next host: the one that just failed is the
+     * least promising place to ask again, whether it was marked down or
+     * merely answered with an error.
      */
-    var addressed = spreadUrl(url);
+    var addressed = spreadUrl(url, tried - 1);
     var target = first ? addressed : (addressed + (addressed.indexOf('?') > -1 ? '&' : '?') + '_retry=' + tried);
     /*
      * The caller's own options are carried through every attempt, so a signal
