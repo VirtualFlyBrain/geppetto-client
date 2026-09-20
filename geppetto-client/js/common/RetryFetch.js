@@ -301,57 +301,103 @@ function wait (ms) {
   });
 }
 
+/*
+ * Whether the page is on its way out. A fetch that dies because the user
+ * navigated away or reloaded looks exactly like a dropped connection, and
+ * used to be retried and reported as one. Once the page is leaving nothing
+ * is worth retrying, and the failure is not the host's to answer for.
+ */
+var leaving = false;
+if (typeof window !== 'undefined' && typeof window.addEventListener === 'function') {
+  window.addEventListener('pagehide', function () {
+    leaving = true;
+  });
+  window.addEventListener('beforeunload', function () {
+    leaving = true;
+  });
+  // back/forward cache brings the page back alive after a pagehide
+  window.addEventListener('pageshow', function () {
+    leaving = false;
+  });
+}
+
+/** For tests, and for anything that needs to know. */
+export function pageLeaving () {
+  return leaving;
+}
+export function setPageLeaving (value) {
+  leaving = (value === true);
+}
+
 /**
- * fetch(url), retried on anything transient.
+ * fetch(url), retried on anything transient -- including a failure while the
+ * body is being read, when a consumer is given.
  *
  * @param init - optional fetch options, for a caller that needs them (an
  *               AbortController signal, say). An abort is never retried.
- * @returns a promise for {response, attempts}; rejects with an error carrying
- *          .reason, .attempts and .url once the attempts are spent.
+ * @param consume - optional function (response) returning a promise for the
+ *               value read from the body. It runs inside the attempt, so a
+ *               connection dropped part-way through a stream is retried from
+ *               the next host like any other failure, instead of surfacing
+ *               after a "successful" fetch. Without it the caller reads the
+ *               body itself and only the request is retried.
+ * @returns a promise for {response, attempts, value}; rejects with an error
+ *          carrying .reason, .attempts, .url and .host once the attempts are
+ *          spent. A failure while the page is unloading has reason 'unload'
+ *          and is not retried.
  */
-export function fetchWithRetry (url, attempts, init) {
+export function fetchWithRetry (url, attempts, init, consume) {
   var limit = attemptLimit(attempts);
   var tried = 0;
+  var lastReason = null;
   var attempt = function () {
     tried++;
-    /*
-     * A retry must not be served the same failure from a cache, and should
-     * not be answered by whatever the first attempt was talking to if that
-     * can be helped. JavaScript cannot choose the IP -- the browser owns
-     * connection reuse and DNS -- but a reload-cache request with a fresh
-     * URL is the most a client can do to make the retry a real one. A
-     * connection-level failure is different: the browser drops that
-     * connection, so the next attempt can land on another round-robin
-     * address by itself.
-     */
     var first = (tried === 1);
     /*
      * Each retry steps to the next host: the one that just failed is the
      * least promising place to ask again, whether it was marked down or
      * merely answered with an error.
      */
-    var addressed = spreadUrl(url, tried - 1);
-    var target = first ? addressed : (addressed + (addressed.indexOf('?') > -1 ? '&' : '?') + '_retry=' + tried);
+    var target = spreadUrl(url, tried - 1);
     /*
-     * The caller's own options are carried through every attempt, so a signal
-     * still aborts a retry; only the cache directive is ours to add.
+     * The URL is never decorated: these files are cached as immutable by URL,
+     * and a cache-busting parameter turned every retry into a full download
+     * of a file the browser may already hold. Only a retry after the host
+     * answered badly (an HTTP error, or a body that would not parse -- either
+     * of which a cache could hand back again) bypasses the cache; a retry
+     * after a dropped connection may be served from it, since a partial
+     * download is never cached.
      */
-    var options = first ? init : withReloadCache(init);
+    var bypass = !first && (lastReason === 'parse' || /^http/.test(lastReason || ''));
+    var options = bypass ? withReloadCache(init) : init;
+    var headersArrived = false;
     return (options ? fetch(target, options) : fetch(target)).then(function (response) {
-      if (response.ok) {
+      headersArrived = true;
+      if (!response.ok) {
+        return Promise.reject({ status: response.status, message: 'HTTP ' + response.status + ' fetching ' + target });
+      }
+      if (typeof consume !== 'function') {
         return { response: response, attempts: tried };
       }
-      return Promise.reject({ status: response.status, message: 'HTTP ' + response.status + ' fetching ' + target });
+      return Promise.resolve(consume(response)).then(function (value) {
+        return { response: response, attempts: tried, value: value };
+      });
     }).catch(function (failure) {
+      var reason = failureReason(failure);
+      if (leaving && (reason === 'network' || reason === 'aborted' || reason === 'error')) {
+        reason = 'unload';
+      }
+      lastReason = reason;
       /*
        * A host that cannot be reached at all is out for this session: it is
        * the case DNS would have routed around, and nothing else should keep
-       * paying for it. An HTTP error is the host answering, so it stays.
+       * paying for it. A host that answered -- with an error, or with a body
+       * that then broke off -- was reachable, so it stays.
        */
-      if (failureReason(failure) === 'network') {
+      if (reason === 'network' && !headersArrived) {
         markHostDown(hostOf(target));
       }
-      if (tried < limit && worthRetrying(failure)) {
+      if (tried < limit && reason !== 'unload' && worthRetrying(failure)) {
         return wait(backoff(tried - 1)).then(attempt);
       }
       var err = new Error((failure && failure.message) ? failure.message : String(failure));
@@ -363,10 +409,11 @@ export function fetchWithRetry (url, attempts, init) {
       if (failure && failure.name) {
         err.name = failure.name;
       }
-      err.reason = failureReason(failure);
+      err.reason = reason;
       err.attempts = tried;
       err.url = url;
       err.host = hostOf(target);
+      err.midStream = headersArrived;
       throw err;
     });
   };

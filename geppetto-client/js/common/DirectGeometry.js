@@ -541,7 +541,8 @@ export default function DirectGeometry (GEPPETTO) {
             path: path,
             reason: ok ? undefined : ((failure && failure.reason) ? failure.reason : failureReason(failure)),
             attempts: attempts,
-            call: ok ? undefined : callTag(url)
+            call: callTag(url),
+            midStream: ok ? undefined : (failure && failure.midStream === true)
           });
         } catch (ignore) {
           // reporting must never break resolution
@@ -553,9 +554,13 @@ export default function DirectGeometry (GEPPETTO) {
        * rather than expanded face by face. SWC is small and stays text.
        */
       var attemptsUsed = 1;
-      fetchWithRetry(url).then(function (result) {
-        attemptsUsed = result.attempts;
-        var response = result.response;
+      /*
+       * The body is read inside the retried call: a connection that drops
+       * part-way through a 7 MB template used to surface as a failure after
+       * one "successful" fetch and go straight to the server fallback. Now it
+       * is retried from the next host like a failed request.
+       */
+      var consume = function (response) {
         if (kind === 'obj' && response.body !== undefined && response.body !== null
           && typeof response.body.getReader === 'function' && typeof TextDecoder === 'function') {
           return readObjStream(response).then(function (geometry) {
@@ -580,6 +585,10 @@ export default function DirectGeometry (GEPPETTO) {
           }
           return swcToRawType(found.type.getId(), text, ref);
         });
+      };
+      fetchWithRetry(url, undefined, undefined, consume).then(function (result) {
+        attemptsUsed = result.attempts;
+        return result.value;
       }).then(function (rawType) {
         var rawModel = wrapResolvedType(that.modelShape(), found.library.getId(), rawType);
         GEPPETTO.Manager.swapResolvedType(rawModel);
@@ -588,7 +597,7 @@ export default function DirectGeometry (GEPPETTO) {
       }).catch(function (err) {
         console.error('DirectGeometry - could not resolve ' + path + ' after '
           + (err && err.attempts ? err.attempts : attemptsUsed) + ' attempt(s) ('
-          + failureReason(err) + '): ' + (err && err.message ? err.message : err));
+          + ((err && err.reason) ? err.reason : failureReason(err)) + '): ' + (err && err.message ? err.message : err));
         report(false, err, (err && err.attempts) ? err.attempts : attemptsUsed);
         settle(false);
       });

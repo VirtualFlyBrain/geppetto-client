@@ -99,9 +99,12 @@ export default function DirectTermInfo (GEPPETTO) {
       var id = variableIds[i];
       var url = that.termInfoUrl(datasource, id);
       var attemptsUsed = 1;
-      fetchWithRetry(url).then(function (result) {
+      // the JSON is read inside the retried call, so a truncated body is retried too
+      fetchWithRetry(url, undefined, undefined, function (response) {
+        return response.json();
+      }).then(function (result) {
         attemptsUsed = result.attempts;
-        return result.response.json();
+        return result.value;
       }).then(function (termInfo) {
         var shape = shapeOf(GEPPETTO.ModelFactory.geppettoModel);
         var built = termInfoToRawModel(termInfo, id, shape);

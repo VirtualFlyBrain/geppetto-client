@@ -543,3 +543,117 @@ test('a host that cannot be reached is dropped for the session', async () => {
   expect(RetryFetch.hostOf(RetryFetch.spreadUrl(url))).toBe('www.virtualflybrain.org');
   delete window.VFB_DATA_HOSTS;
 });
+
+/*
+ * The template is 7 MB and streamed. GA showed 300 fallbacks a day on it, all
+ * "network" after one attempt: the request had succeeded and the body broke
+ * off part-way, which the retry loop never saw. Reading the body is part of
+ * the attempt now.
+ */
+const nodeUtil = require('util');
+global.TextDecoder = nodeUtil.TextDecoder;
+const streamOf = (chunks, failAfter) => ({
+  ok: true,
+  status: 200,
+  body: {
+    getReader: () => {
+      let i = 0;
+      return {
+        read: () => {
+          if (failAfter !== undefined && i >= failAfter) {
+            return Promise.reject(new TypeError('network error'));
+          }
+          if (i >= chunks.length) {
+            return Promise.resolve({ done: true });
+          }
+          return Promise.resolve({ done: false, value: new nodeUtil.TextEncoder().encode(chunks[i++]) });
+        },
+        cancel: () => Promise.resolve(),
+        releaseLock: () => null
+      };
+    }
+  }
+});
+
+test('a body that breaks off mid-stream is retried from another host and recovers', async () => {
+  RetryFetch.resetHosts();
+  const nodes = ['buttermilk', 'parsley', 'sourcream'].map(n => n + '.virtualflybrain.org');
+  window.VFB_DATA_HOSTS = nodes.join(',');
+  const url = 'https://www.virtualflybrain.org/data/VFB/i/0010/1567/VFB_00101567/volume.obj';
+  const seen = [];
+  global.fetch = jest.fn((target, options) => {
+    seen.push({ host: RetryFetch.hostOf(target), url: target, options });
+    return Promise.resolve(seen.length === 1
+      ? streamOf(['v 0 0 0\n', 'v 1 0 0\n'], 1)
+      : streamOf(['v 0 0 0\nv 1 0 0\nv 0 1 0\n', 'f 1 2 3\n']));
+  });
+  const result = await RetryFetch.fetchWithRetry(url, undefined, undefined,
+    response => DirectGeometryModule.readObjStream(response));
+  expect(result.attempts).toBe(2);
+  expect(result.value.vertexCount).toBe(3);
+  expect(seen[0].host).not.toBe(seen[1].host);
+  // the URL is never decorated, so a cached copy stays usable...
+  seen.forEach(s => expect(s.url).not.toMatch(/_retry/));
+  // ...and a dropped connection does not bypass the cache: nothing partial is ever cached
+  expect(seen[1].options).toBeUndefined();
+  // a host that answered and then dropped is not out for the session
+  expect(nodes).toContain(RetryFetch.hostFor(url));
+  expect(nodes).toContain(RetryFetch.hostFor(url, 1));
+  delete window.VFB_DATA_HOSTS;
+});
+
+test('a retry after an HTTP error or an unparseable body bypasses the cache, without decorating the URL', async () => {
+  RetryFetch.resetHosts();
+  delete window.VFB_DATA_HOSTS;
+  const url = 'https://v3-cached.virtualflybrain.org/get_term_info?id=VFB_00101567';
+  const seen = [];
+  global.fetch = jest.fn((target, options) => {
+    seen.push({ url: target, options });
+    if (seen.length === 1) { return Promise.resolve({ ok: false, status: 502 }); }
+    if (seen.length === 2) { return Promise.resolve({ ok: true, json: () => Promise.reject(new SyntaxError('Unexpected token < in JSON')) }); }
+    return Promise.resolve({ ok: true, json: () => Promise.resolve({ fine: true }) });
+  });
+  const result = await RetryFetch.fetchWithRetry(url, undefined, undefined, r => r.json());
+  expect(result.attempts).toBe(3);
+  expect(result.value).toEqual({ fine: true });
+  expect(seen[0].options).toBeUndefined();
+  expect(seen[1].options).toEqual({ cache: 'reload' });
+  expect(seen[2].options).toEqual({ cache: 'reload' });
+  seen.forEach(s => expect(s.url).toBe(url));
+});
+
+test('a failure while the page is unloading is not retried, and says so', async () => {
+  RetryFetch.resetHosts();
+  delete window.VFB_DATA_HOSTS;
+  const url = 'https://www.virtualflybrain.org/data/VFB/i/0010/1567/VFB_00101567/volume.obj';
+  global.fetch = jest.fn(() => Promise.reject(new TypeError('Failed to fetch')));
+  RetryFetch.setPageLeaving(true);
+  let caught = null;
+  try {
+    await RetryFetch.fetchWithRetry(url);
+  } catch (e) {
+    caught = e;
+  }
+  RetryFetch.setPageLeaving(false);
+  expect(caught.reason).toBe('unload');
+  expect(caught.attempts).toBe(1);
+  expect(global.fetch).toHaveBeenCalledTimes(1);
+  // and the host is not blamed for it
+  expect(RetryFetch.hostFor(url)).toBe('www.virtualflybrain.org');
+});
+
+test('a body that gives up after every attempt is reported as a mid-stream failure', async () => {
+  RetryFetch.resetHosts();
+  delete window.VFB_DATA_HOSTS;
+  const url = 'https://www.virtualflybrain.org/data/VFB/i/0010/1567/VFB_00101567/volume.obj';
+  global.fetch = jest.fn(() => Promise.resolve(streamOf(['v 0 0 0\n'], 1)));
+  let caught = null;
+  try {
+    await RetryFetch.fetchWithRetry(url, undefined, undefined, r => DirectGeometryModule.readObjStream(r));
+  } catch (e) {
+    caught = e;
+  }
+  expect(caught.reason).toBe('network');
+  expect(caught.attempts).toBe(4);
+  expect(caught.midStream).toBe(true);
+});

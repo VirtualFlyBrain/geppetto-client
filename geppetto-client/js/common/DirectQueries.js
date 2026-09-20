@@ -129,8 +129,11 @@ export default function DirectQueries (GEPPETTO) {
   };
 
   var fetchJson = function (url) {
-    return fetchWithRetry(url).then(function (result) {
-      return result.response.json();
+    // the JSON is read inside the retried call, so a truncated body is retried too
+    return fetchWithRetry(url, undefined, undefined, function (response) {
+      return response.json();
+    }).then(function (result) {
+      return result.value;
     });
   };
 
