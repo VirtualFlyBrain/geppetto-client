@@ -1055,23 +1055,15 @@ define(['jquery'], function () {
         geometry.addAttribute('position', new THREE.BufferAttribute(node.objGeometry.positions, 3));
         geometry.setIndex(new THREE.BufferAttribute(node.objGeometry.indices, 1));
         /*
-         * Normals come with the parsed mesh. computeVertexNormals below does
-         * the same arithmetic but allocates three Vector3 objects per face,
-         * which for a VFB mesh is millions of short-lived objects on the main
-         * thread while the user waits; the parser fills a typed array instead,
-         * and does it in the worker when parsing there.
-         */
-        if (node.objGeometry.normals !== undefined && node.objGeometry.normals !== null) {
-          geometry.addAttribute('normal', new THREE.BufferAttribute(node.objGeometry.normals, 3));
-        }
-        /*
          * The same material OBJLoader gives a mesh with no MTL (see its
          * `if (!material)` branch): Lambert, both sides drawn, transparent
          * without writing depth. A MeshPhongMaterial here rendered the
          * templates solid instead of see-through.
          */
         scene = new THREE.Object3D();
-        scene.add(new THREE.Mesh(geometry, new THREE.MeshLambertMaterial({ side: THREE.DoubleSide, opacity: 1, transparent: true, depthWrite: false })));
+        scene.add(new THREE.Mesh(geometry, new THREE.MeshLambertMaterial({
+          side: THREE.DoubleSide, opacity: 1, transparent: true, depthWrite: false
+        })));
       } else {
         var manager = new THREE.LoadingManager();
         manager.onProgress = function (item, loaded, total) {
@@ -1087,16 +1079,7 @@ define(['jquery'], function () {
           child.material.defaultColor = GEPPETTO.Resources.COLORS.DEFAULT;
           child.material.defaultOpacity = GEPPETTO.Resources.OPACITY.DEFAULT;
           child.material.opacity = GEPPETTO.Resources.OPACITY.DEFAULT;
-          /*
-           * Only when the mesh does not already have normals. A parsed mesh
-           * brings its own, computed without the per-face allocation this
-           * does -- recomputing them was pure cost, and it is the largest
-           * piece of main-thread work a mesh load does.
-           */
-          if (child.geometry.attributes === undefined
-            || child.geometry.attributes.normal === undefined) {
-            child.geometry.computeVertexNormals();
-          }
+          child.geometry.computeVertexNormals();
         }
       });
 
