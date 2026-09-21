@@ -146,7 +146,12 @@ export default function DirectQueries (GEPPETTO) {
         query: queryId,
         reason: ok ? undefined : ((failure && failure.reason) ? failure.reason : failureReason(failure)),
         attempts: (failure && failure.attempts) ? failure.attempts : undefined,
-        call: ok ? undefined : ((failure && failure.url) ? callTag(failure.url) : queryId)
+        call: ok ? undefined : ((failure && failure.url) ? callTag(failure.url) : queryId),
+        host: ok ? undefined : (failure && failure.host),
+        visibility: ok ? undefined : (failure && failure.visibility),
+        online: ok ? undefined : (failure && failure.online),
+        effectiveType: ok ? undefined : (failure && failure.effectiveType),
+        frozeDuringCall: ok ? undefined : (failure && failure.frozeDuringCall === true)
       });
     } catch (ignore) {
       // reporting must never break a query

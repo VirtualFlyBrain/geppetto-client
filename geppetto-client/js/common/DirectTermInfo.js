@@ -81,7 +81,12 @@ export default function DirectTermInfo (GEPPETTO) {
           id: id,
           reason: ok ? undefined : ((failure && failure.reason) ? failure.reason : failureReason(failure)),
           attempts: attempts,
-          call: ok ? undefined : ((failure && failure.url) ? callTag(failure.url) : id)
+          call: ok ? undefined : ((failure && failure.url) ? callTag(failure.url) : id),
+          host: ok ? undefined : (failure && failure.host),
+          visibility: ok ? undefined : (failure && failure.visibility),
+          online: ok ? undefined : (failure && failure.online),
+          effectiveType: ok ? undefined : (failure && failure.effectiveType),
+          frozeDuringCall: ok ? undefined : (failure && failure.frozeDuringCall === true)
         });
       } catch (ignore) {
         // reporting must never break the load

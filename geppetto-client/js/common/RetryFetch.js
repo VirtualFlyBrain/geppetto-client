@@ -308,6 +308,14 @@ function wait (ms) {
  * is worth retrying, and the failure is not the host's to answer for.
  */
 var leaving = false;
+/*
+ * How many times the page has been frozen (backgrounded on mobile, or tab
+ * discard candidate) since load. A frozen page's timers are suspended, not
+ * cancelled, so a pending retry still fires on resume -- but a failure that
+ * happened around a freeze is a different animal from a plain dropped
+ * connection, and worth telling apart when diagnosing where fails cluster.
+ */
+var freezeCount = 0;
 if (typeof window !== 'undefined' && typeof window.addEventListener === 'function') {
   window.addEventListener('pagehide', function () {
     leaving = true;
@@ -319,6 +327,12 @@ if (typeof window !== 'undefined' && typeof window.addEventListener === 'functio
   window.addEventListener('pageshow', function () {
     leaving = false;
   });
+  // Page Lifecycle API: Chrome/Android backgrounding a tab under memory or
+  // battery pressure. Not supported everywhere (notably not Safari), so this
+  // is a bonus signal where the browser offers it, never a requirement.
+  document.addEventListener('freeze', function () {
+    freezeCount++;
+  });
 }
 
 /** For tests, and for anything that needs to know. */
@@ -327,6 +341,34 @@ export function pageLeaving () {
 }
 export function setPageLeaving (value) {
   leaving = (value === true);
+}
+
+/*
+ * A compact snapshot of the browser/network conditions at the moment a call
+ * finally gives up, attached to the thrown error so a GA event (or a console
+ * log) can carry it without the caller having to know any of this itself.
+ * Nothing here is collected unless the platform offers it; every field is
+ * best-effort and can be absent.
+ */
+function diagnostics (freezesAtStart) {
+  var d = {};
+  try {
+    if (typeof document !== 'undefined') {
+      d.visibility = document.visibilityState;
+    }
+    if (typeof navigator !== 'undefined') {
+      d.online = navigator.onLine;
+      var c = navigator.connection || navigator.mozConnection || navigator.webkitConnection;
+      if (c) {
+        d.effectiveType = c.effectiveType;
+        d.saveData = c.saveData;
+      }
+    }
+    d.frozeDuringCall = freezeCount > freezesAtStart;
+  } catch (ignore) {
+    // diagnostics must never be able to break the call they describe
+  }
+  return d;
 }
 
 /**
@@ -350,6 +392,7 @@ export function fetchWithRetry (url, attempts, init, consume) {
   var limit = attemptLimit(attempts);
   var tried = 0;
   var lastReason = null;
+  var freezesAtStart = freezeCount;
   var attempt = function () {
     tried++;
     var first = (tried === 1);
@@ -414,6 +457,23 @@ export function fetchWithRetry (url, attempts, init, consume) {
       err.url = url;
       err.host = hostOf(target);
       err.midStream = headersArrived;
+      /*
+       * A consumer (the OBJ stream reader, say) can attach its own facts to
+       * the failure it threw -- bytes read before the drop, say -- and they
+       * ride along here rather than needing their own reporting path.
+       */
+      if (failure && typeof failure.bytesReceived === 'number') {
+        err.bytesReceived = failure.bytesReceived;
+      }
+      if (failure && typeof failure.contentLength === 'number') {
+        err.contentLength = failure.contentLength;
+      }
+      var diag = diagnostics(freezesAtStart);
+      for (var key in diag) {
+        if (Object.prototype.hasOwnProperty.call(diag, key)) {
+          err[key] = diag[key];
+        }
+      }
       throw err;
     });
   };

@@ -657,3 +657,47 @@ test('a body that gives up after every attempt is reported as a mid-stream failu
   expect(caught.attempts).toBe(4);
   expect(caught.midStream).toBe(true);
 });
+
+/*
+ * A dropped body carries how far it got before it died, and the browser/
+ * network conditions at the moment it gave up, so a fail that can't be
+ * reproduced by hand still tells its own story: where it stopped, and
+ * whether the tab was hidden, offline, or a slow connection at the time.
+ */
+test('a mid-stream failure carries bytes read against the declared length', async () => {
+  RetryFetch.resetHosts();
+  delete window.VFB_DATA_HOSTS;
+  const url = 'https://www.virtualflybrain.org/data/VFB/i/0010/1567/VFB_00101567/volume.obj';
+  const withHeaders = Object.assign(streamOf(['v 0 0 0\nv 1 0 0\n'], 1), {
+    headers: { get: key => (key === 'content-length' ? '9999' : null) }
+  });
+  global.fetch = jest.fn(() => Promise.resolve(withHeaders));
+  let caught = null;
+  try {
+    await RetryFetch.fetchWithRetry(url, undefined, undefined, r => DirectGeometryModule.readObjStream(r));
+  } catch (e) {
+    caught = e;
+  }
+  expect(caught.midStream).toBe(true);
+  expect(caught.bytesReceived).toBe('v 0 0 0\nv 1 0 0\n'.length);
+  expect(caught.contentLength).toBe(9999);
+  // the run-time snapshot RetryFetch attaches rides along too
+  expect(caught).toHaveProperty('visibility');
+  expect(caught).toHaveProperty('online');
+  expect(caught).toHaveProperty('frozeDuringCall');
+});
+
+test('a body with no headers at all still fails cleanly (no content-length to report)', async () => {
+  RetryFetch.resetHosts();
+  delete window.VFB_DATA_HOSTS;
+  const url = 'https://www.virtualflybrain.org/data/VFB/i/0010/1567/VFB_00101567/volume.obj';
+  global.fetch = jest.fn(() => Promise.resolve(streamOf(['v 0 0 0\n'], 1)));
+  let caught = null;
+  try {
+    await RetryFetch.fetchWithRetry(url, undefined, undefined, r => DirectGeometryModule.readObjStream(r));
+  } catch (e) {
+    caught = e;
+  }
+  expect(caught.bytesReceived).toBe('v 0 0 0\n'.length);
+  expect(caught.contentLength).toBeUndefined();
+});

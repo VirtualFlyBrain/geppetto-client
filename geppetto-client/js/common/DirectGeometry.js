@@ -196,14 +196,33 @@ export function readObjStream (response) {
   var parser = createObjParser();
   var decoder = new TextDecoder('utf-8');
   var reader = response.body.getReader();
+  /*
+   * How far the download got before a drop, against the size the server
+   * declared: the difference between "died before a byte arrived" and "died
+   * three quarters through" is exactly the kind of thing worth knowing when
+   * a fail can't be reproduced by hand.
+   */
+  var bytesRead = 0;
+  var declaredLength = (response.headers && typeof response.headers.get === 'function')
+    ? parseInt(response.headers.get('content-length'), 10)
+    : NaN;
   var step = function () {
     return reader.read().then(function (result) {
       if (result.done) {
         parser.push(decoder.decode());
         return parser.finish();
       }
+      bytesRead += result.value.length;
       parser.push(decoder.decode(result.value, { stream: true }));
       return step();
+    }, function (failure) {
+      if (failure && typeof failure === 'object') {
+        failure.bytesReceived = bytesRead;
+        if (!isNaN(declaredLength)) {
+          failure.contentLength = declaredLength;
+        }
+      }
+      throw failure;
     });
   };
   return step();
@@ -542,7 +561,19 @@ export default function DirectGeometry (GEPPETTO) {
             reason: ok ? undefined : ((failure && failure.reason) ? failure.reason : failureReason(failure)),
             attempts: attempts,
             call: callTag(url),
-            midStream: ok ? undefined : (failure && failure.midStream === true)
+            midStream: ok ? undefined : (failure && failure.midStream === true),
+            /*
+             * Everything below is only ever populated on a real, exhausted
+             * failure (ok === false); a caller that only wants the counts it
+             * already had can keep ignoring them.
+             */
+            host: ok ? undefined : (failure && failure.host),
+            visibility: ok ? undefined : (failure && failure.visibility),
+            online: ok ? undefined : (failure && failure.online),
+            effectiveType: ok ? undefined : (failure && failure.effectiveType),
+            frozeDuringCall: ok ? undefined : (failure && failure.frozeDuringCall === true),
+            bytesReceived: ok ? undefined : (failure && failure.bytesReceived),
+            contentLength: ok ? undefined : (failure && failure.contentLength)
           });
         } catch (ignore) {
           // reporting must never break resolution
