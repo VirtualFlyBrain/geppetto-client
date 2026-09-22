@@ -344,18 +344,30 @@ function withHeaders (init, extra) {
 }
 
 /*
- * The validator a resume is conditioned on. Only a strong ETag will do: a
- * weak one (W/"...") promises the same meaning, not the same bytes, and a
- * resume is a byte-offset claim. Without one, a dropped download starts over.
+ * The validator a resume is conditioned on (If-Range). A strong ETag by
+ * preference: a weak one (W/"...") promises the same meaning, not the same
+ * bytes, and a resume is a byte-offset claim. Failing that, Last-Modified,
+ * which If-Range also takes -- and which matters here because the data hosts
+ * are another origin, and a browser only lets a page read a cross-origin
+ * response's ETag if the host exposes it (Access-Control-Expose-Headers),
+ * where Last-Modified is always readable. Without either, a dropped download
+ * starts over.
  */
-function strongEtag (response) {
+function resumeValidator (response) {
   try {
-    var tag = response && response.headers && typeof response.headers.get === 'function'
-      ? response.headers.get('etag') : null;
-    if (typeof tag !== 'string' || tag.length < 3 || /^W\//i.test(tag)) {
+    var headers = response && response.headers;
+    if (!headers || typeof headers.get !== 'function') {
       return null;
     }
-    return tag;
+    var tag = headers.get('etag');
+    if (typeof tag === 'string' && tag.length >= 3 && !/^W\//i.test(tag)) {
+      return tag;
+    }
+    var modified = headers.get('last-modified');
+    if (typeof modified === 'string' && modified.length > 0) {
+      return modified;
+    }
+    return null;
   } catch (ignore) {
     return null;
   }
@@ -454,7 +466,7 @@ function diagnostics (freezesAtStart) {
  *               can pick a dropped download up where it left off. It reports
  *               how far it got as .bytesReceived on the failure it throws
  *               (cumulative across calls), and on the next call receives
- *               resume = {offset, etag} when the request asked for bytes from
+ *               resume = {offset, validator} when the request asked for bytes from
  *               that offset. It must then check the response: a 206 whose
  *               Content-Range starts at the offset continues; anything else
  *               (a 200 from a host that ignored the Range, or whose file no
@@ -493,7 +505,7 @@ export function fetchWithRetry (url, attempts, init, consume) {
    * host is still the same file at the same offset.
    */
   var offset = 0;
-  var etag = null;
+  var validator = null;
   var attempt = function (resuming) {
     requests++;
     var first = (requests === 1);
@@ -501,7 +513,7 @@ export function fetchWithRetry (url, attempts, init, consume) {
      * Each retry steps to the next host: the one that just failed is the
      * least promising place to ask again, whether it was marked down or
      * merely answered with an error. A resume steps too -- every host serves
-     * the same bytes under the same ETag, and If-Range makes sure of it.
+     * the same bytes under the same validator, and If-Range makes sure of it.
      */
     var target = spreadUrl(url, requests - 1);
     /*
@@ -519,13 +531,13 @@ export function fetchWithRetry (url, attempts, init, consume) {
      * Ask for the rest of the file whenever there is a rest to ask for,
      * strike or not: the offset is only ever set from bytes the consumer has
      * already parsed, so there is never a reason to fetch them again. The
-     * ETag condition means a host whose copy differs answers with the whole
-     * file instead, and the consumer starts over on that.
+     * If-Range condition means a host whose copy differs answers with the
+     * whole file instead, and the consumer starts over on that.
      */
     var resume;
     if (resuming) {
-      resume = { offset: offset, etag: etag };
-      options = withHeaders(options, { Range: 'bytes=' + offset + '-', 'If-Range': etag });
+      resume = { offset: offset, validator: validator };
+      options = withHeaders(options, { Range: 'bytes=' + offset + '-', 'If-Range': validator });
     }
     var headersArrived = false;
     return (options ? fetch(target, options) : fetch(target)).then(function (response) {
@@ -533,8 +545,8 @@ export function fetchWithRetry (url, attempts, init, consume) {
       if (!response.ok) {
         return Promise.reject({ status: response.status, message: 'HTTP ' + response.status + ' fetching ' + target });
       }
-      if (etag === null) {
-        etag = strongEtag(response);
+      if (validator === null) {
+        validator = resumeValidator(response);
       }
       if (typeof consume !== 'function') {
         return { response: response, attempts: requests, resumes: resumes };
@@ -574,7 +586,7 @@ export function fetchWithRetry (url, attempts, init, consume) {
        * host answered with an error -- and whatever the consumer holds is
        * still good, so the offset stands and the next request asks from it.
        */
-      var resumable = canResume && offset > 0 && etag !== null;
+      var resumable = canResume && offset > 0 && validator !== null;
       /*
        * A connection that was delivering and then dropped is an interruption,
        * not a failed attempt: it costs no strike and clears the ones before

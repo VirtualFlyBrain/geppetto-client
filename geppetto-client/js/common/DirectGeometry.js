@@ -247,9 +247,24 @@ export function createObjConsumer () {
   var consume = function (response, resume) {
     var continuing = false;
     if (response.status === 206) {
+      var expected = resume !== undefined && parser !== null && resume.offset === consumed;
       var range = contentRange(response);
-      continuing = resume !== undefined && range !== null && parser !== null
-        && range.start === resume.offset && resume.offset === consumed;
+      if (expected && range !== null) {
+        continuing = range.start === resume.offset;
+        if (continuing && !isNaN(range.total)) {
+          total = range.total;
+        }
+      } else if (expected && !isNaN(total)) {
+        /*
+         * No Content-Range to read: a cross-origin response only shows a
+         * page that header if the host exposes it, and the data hosts do
+         * not. Content-Length is always readable, and for the open-ended
+         * range that was asked for it fixes the start exactly: a body of
+         * (total - offset) bytes can only have begun at offset.
+         */
+        var declaredPart = parseInt(header(response, 'content-length'), 10);
+        continuing = !isNaN(declaredPart) && declaredPart === total - resume.offset;
+      }
       if (!continuing) {
         /*
          * A range that is not the continuation asked for -- or one nobody
@@ -261,9 +276,6 @@ export function createObjConsumer () {
         var refused = new Error('partial content that does not continue the download');
         refused.bytesReceived = 0;
         return Promise.reject(refused);
-      }
-      if (!isNaN(range.total)) {
-        total = range.total;
       }
     }
     if (!continuing) {

@@ -740,6 +740,9 @@ function objServer (plan, opts = {}) {
     const body = bytes.subarray(start);
     hdr['content-length'] = String(body.length);
     if (!p.noEtag && !opts.noEtag) { hdr.etag = ETAG; }
+    if (opts.lastModified) { hdr['last-modified'] = opts.lastModified; }
+    // a cross-origin response as the browser shows it: no ETag, no Content-Range
+    if (opts.cors) { delete hdr.etag; delete hdr['content-range']; }
     // serve in 4-byte chunks so a drop lands mid-line
     let pos = 0;
     return Promise.resolve({
@@ -921,4 +924,53 @@ test('an HTTP error on a resume keeps the offset: the next request asks from the
   expect(server.seen[2].range).toBe('bytes=21-');
   // an HTTP error bypasses the cache on the retry, Range or not
   expect(server.seen[2].cache).toBe('reload');
+});
+
+/*
+ * The data hosts are another origin, and without Access-Control-Expose-Headers
+ * the browser hides their ETag and Content-Range from the page. Last-Modified
+ * and Content-Length are always readable, and between them are enough.
+ */
+const LAST_MODIFIED = 'Mon, 17 Aug 2020 08:53:24 GMT';
+
+test('with only Last-Modified readable, a resume is conditioned on that', async () => {
+  spreadHosts();
+  const server = objServer([{ drop: 21 }, {}], { noEtag: true, lastModified: LAST_MODIFIED });
+  global.fetch = server.fetch;
+  const result = await loadObj();
+  expect(result.value).toMatchObject(whole);
+  expect(result.resumes).toBe(1);
+  expect(server.seen[1].range).toBe('bytes=21-');
+  expect(server.seen[1].ifRange).toBe(LAST_MODIFIED);
+});
+
+test('a cross-origin 206 with its Content-Range hidden is accepted when its length pins the start', async () => {
+  spreadHosts();
+  const server = objServer([{ drop: 21 }, {}], { cors: true, lastModified: LAST_MODIFIED });
+  global.fetch = server.fetch;
+  const result = await loadObj();
+  expect(result.value).toMatchObject(whole);
+  expect(result.attempts).toBe(2);
+  expect(result.resumes).toBe(1);
+});
+
+test('a cross-origin 206 with its Content-Range hidden and the wrong length is still refused', async () => {
+  spreadHosts();
+  const server = objServer([{ drop: 21 }, { shift: -8 }, {}], { cors: true, lastModified: LAST_MODIFIED });
+  global.fetch = server.fetch;
+  const result = await loadObj();
+  // never a truncated or doubled mesh, whatever the headers hide
+  expect(result.value).toMatchObject(whole);
+  expect(result.attempts).toBe(3);
+  expect(server.seen[2].range).toBeUndefined();
+});
+
+test('with neither validator readable, a dropped download starts over', async () => {
+  spreadHosts();
+  const server = objServer([{ drop: 21 }, {}], { cors: true });
+  global.fetch = server.fetch;
+  const result = await loadObj();
+  expect(result.value).toMatchObject(whole);
+  expect(result.resumes).toBe(0);
+  expect(server.seen[1].range).toBeUndefined();
 });
