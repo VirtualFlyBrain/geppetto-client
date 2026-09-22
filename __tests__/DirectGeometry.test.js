@@ -739,8 +739,8 @@ function objServer (plan, opts = {}) {
     }
     const body = bytes.subarray(start);
     hdr['content-length'] = String(body.length);
-    if (!p.noEtag && !opts.noEtag) { hdr.etag = ETAG; }
-    if (opts.lastModified) { hdr['last-modified'] = opts.lastModified; }
+    if (!p.noEtag && !opts.noEtag) { hdr.etag = p.etag || ETAG; }
+    if (opts.lastModified || p.lastModified) { hdr['last-modified'] = p.lastModified || opts.lastModified; }
     // a cross-origin response as the browser shows it: no ETag, no Content-Range
     if (opts.cors) { delete hdr.etag; delete hdr['content-range']; }
     // serve in 4-byte chunks so a drop lands mid-line
@@ -793,7 +793,8 @@ test('a body that drops part-way is resumed from the last byte parsed, on the ne
   expect(server.seen[0].range).toBeUndefined();
   // 21 bytes = "v 0 0 0\nv 1 0 0\nv 0 1" -- resumed mid-line
   expect(server.seen[1].range).toBe('bytes=21-');
-  expect(server.seen[1].ifRange).toBe(ETAG);
+  // never If-Range: it would make the browser preflight, and the data hosts refuse OPTIONS
+  expect(server.seen[1].ifRange).toBeUndefined();
   // a resume is a dropped connection, never a cache bypass
   expect(server.seen[1].cache).toBeUndefined();
   expect(server.seen[1].host).not.toBe(server.seen[0].host);
@@ -933,7 +934,7 @@ test('an HTTP error on a resume keeps the offset: the next request asks from the
  */
 const LAST_MODIFIED = 'Mon, 17 Aug 2020 08:53:24 GMT';
 
-test('with only Last-Modified readable, a resume is conditioned on that', async () => {
+test('with only Last-Modified readable, a resume is checked against that', async () => {
   spreadHosts();
   const server = objServer([{ drop: 21 }, {}], { noEtag: true, lastModified: LAST_MODIFIED });
   global.fetch = server.fetch;
@@ -941,7 +942,30 @@ test('with only Last-Modified readable, a resume is conditioned on that', async 
   expect(result.value).toMatchObject(whole);
   expect(result.resumes).toBe(1);
   expect(server.seen[1].range).toBe('bytes=21-');
-  expect(server.seen[1].ifRange).toBe(LAST_MODIFIED);
+  expect(server.seen[1].ifRange).toBeUndefined();
+});
+
+test('a 206 of a different version (ETag) is refused, and the next request starts over', async () => {
+  spreadHosts();
+  const server = objServer([{ drop: 21 }, { etag: '"changed-file"' }, {}]);
+  global.fetch = server.fetch;
+  const result = await loadObj();
+  // the guarantee If-Range used to give: bytes of another version are never spliced in
+  expect(result.value).toMatchObject(whole);
+  expect(result.attempts).toBe(3);
+  expect(server.seen[1].range).toBe('bytes=21-');
+  expect(server.seen[2].range).toBeUndefined();
+});
+
+test('a 206 of a different version (Last-Modified, no ETag) is refused too', async () => {
+  spreadHosts();
+  const server = objServer([{ drop: 21 }, { lastModified: 'Tue, 01 Jan 2019 00:00:00 GMT' }, {}],
+    { noEtag: true, lastModified: LAST_MODIFIED });
+  global.fetch = server.fetch;
+  const result = await loadObj();
+  expect(result.value).toMatchObject(whole);
+  expect(result.attempts).toBe(3);
+  expect(server.seen[2].range).toBeUndefined();
 });
 
 test('a cross-origin 206 with its Content-Range hidden is accepted when its length pins the start', async () => {

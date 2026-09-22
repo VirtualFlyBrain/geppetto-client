@@ -35,7 +35,7 @@ export function objToRawType (id, objText) {
   };
 }
 
-import { fetchWithRetry, failureReason, callTag } from './RetryFetch';
+import { fetchWithRetry, failureReason, callTag, versionOf, sameVersion } from './RetryFetch';
 
 /**
  * V8 cannot hold a string longer than this many characters, so an OBJ bigger
@@ -247,10 +247,18 @@ export function createObjConsumer () {
   var consume = function (response, resume) {
     var continuing = false;
     if (response.status === 206) {
-      var expected = resume !== undefined && parser !== null && resume.offset === consumed;
+      /*
+       * Only a piece of the very file the parser has been fed can be fed in
+       * after it. Same version first (the ETag where both responses show
+       * one, else Last-Modified), then the same place in it.
+       */
+      var expected = resume !== undefined && parser !== null && resume.offset === consumed
+        && resume.version !== undefined && resume.version !== null
+        && sameVersion(resume.version, versionOf(response));
       var range = contentRange(response);
       if (expected && range !== null) {
-        continuing = range.start === resume.offset;
+        continuing = range.start === resume.offset
+          && (isNaN(total) || isNaN(range.total) || range.total === total);
         if (continuing && !isNaN(range.total)) {
           total = range.total;
         }

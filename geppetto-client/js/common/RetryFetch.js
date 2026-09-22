@@ -343,34 +343,52 @@ function withHeaders (init, extra) {
   return options;
 }
 
-/*
- * The validator a resume is conditioned on (If-Range). A strong ETag by
- * preference: a weak one (W/"...") promises the same meaning, not the same
- * bytes, and a resume is a byte-offset claim. Failing that, Last-Modified,
- * which If-Range also takes -- and which matters here because the data hosts
- * are another origin, and a browser only lets a page read a cross-origin
- * response's ETag if the host exposes it (Access-Control-Expose-Headers),
- * where Last-Modified is always readable. Without either, a dropped download
- * starts over.
+/**
+ * What identifies the version of the file a response carries: a strong ETag
+ * (a weak one, W/"...", promises the same meaning, not the same bytes, and a
+ * resume is a byte-offset claim) and Last-Modified. Either can be missing --
+ * the data hosts are another origin, and a browser only shows a page a
+ * cross-origin response's ETag if the host exposes it, where Last-Modified
+ * is always readable.
+ *
+ * A resume is checked against these rather than sent conditionally: an
+ * If-Range header makes the browser preflight the request with OPTIONS,
+ * which the data hosts refuse (405), so the request never leaves the page.
+ * A plain Range header with a simple value needs no preflight. The consumer
+ * compares what the 206 says it is with what the first response said, and
+ * refuses to splice on any difference -- the same guarantee, one round trip
+ * later in the case that should never happen for an immutable file.
  */
-function resumeValidator (response) {
+export function versionOf (response) {
+  var version = { etag: null, lastModified: null };
   try {
     var headers = response && response.headers;
     if (!headers || typeof headers.get !== 'function') {
-      return null;
+      return version;
     }
     var tag = headers.get('etag');
     if (typeof tag === 'string' && tag.length >= 3 && !/^W\//i.test(tag)) {
-      return tag;
+      version.etag = tag;
     }
     var modified = headers.get('last-modified');
     if (typeof modified === 'string' && modified.length > 0) {
-      return modified;
+      version.lastModified = modified;
     }
-    return null;
   } catch (ignore) {
-    return null;
+    // a response that will not say is one that cannot be resumed against
   }
+  return version;
+}
+
+/** Whether two versions are known to be the same file, by the strongest fact both carry. */
+export function sameVersion (a, b) {
+  if (a.etag !== null && b.etag !== null) {
+    return a.etag === b.etag;
+  }
+  if (a.lastModified !== null && b.lastModified !== null) {
+    return a.lastModified === b.lastModified;
+  }
+  return false;
 }
 
 function wait (ms) {
@@ -466,11 +484,11 @@ function diagnostics (freezesAtStart) {
  *               can pick a dropped download up where it left off. It reports
  *               how far it got as .bytesReceived on the failure it throws
  *               (cumulative across calls), and on the next call receives
- *               resume = {offset, validator} when the request asked for bytes from
- *               that offset. It must then check the response: a 206 whose
- *               Content-Range starts at the offset continues; anything else
- *               (a 200 from a host that ignored the Range, or whose file no
- *               longer matches the ETag) starts the parse over. A call with
+ *               resume = {offset, version} when the request asked for bytes from
+ *               that offset. It must then check the response: a 206 of the
+ *               same version whose Content-Range starts at the offset
+ *               continues; a 200 (a host that ignored the Range) starts the
+ *               parse over; any other 206 is refused. A call with
  *               no resume argument is a fresh download and must start over
  *               whatever state the consumer holds.
  * @returns a promise for {response, attempts, resumes, value}; rejects with an
@@ -483,7 +501,7 @@ function diagnostics (freezesAtStart) {
  * and ATTEMPTS strikes end the call. A body that broke off after making
  * progress is not a strike at all: it is a normal interruption on a long
  * transfer, so the download is resumed from the last byte parsed (HTTP Range,
- * conditioned on the file's ETag so a changed file restarts rather than
+ * checked against the file's ETag so a changed file restarts rather than
  * splices), and the strike count goes back to zero. Nothing about a
  * connection that was working and then wasn't says the method is wrong, and
  * giving up the direct load for the server on that basis just re-fetches the
@@ -500,12 +518,12 @@ export function fetchWithRetry (url, attempts, init, consume) {
   var lastReason = null;
   var freezesAtStart = freezeCount;
   /*
-   * Where the consumer has got to, and the validator that offset is good
-   * against. Both belong to the call, not the attempt: a resume on another
-   * host is still the same file at the same offset.
+   * Where the consumer has got to, and which version of the file those
+   * bytes came from. Both belong to the call, not the attempt: a resume on
+   * another host is still the same file at the same offset.
    */
   var offset = 0;
-  var validator = null;
+  var version = null;
   var attempt = function (resuming) {
     requests++;
     var first = (requests === 1);
@@ -513,7 +531,7 @@ export function fetchWithRetry (url, attempts, init, consume) {
      * Each retry steps to the next host: the one that just failed is the
      * least promising place to ask again, whether it was marked down or
      * merely answered with an error. A resume steps too -- every host serves
-     * the same bytes under the same validator, and If-Range makes sure of it.
+     * the same bytes under the same ETag, and the consumer checks that it did.
      */
     var target = spreadUrl(url, requests - 1);
     /*
@@ -531,13 +549,13 @@ export function fetchWithRetry (url, attempts, init, consume) {
      * Ask for the rest of the file whenever there is a rest to ask for,
      * strike or not: the offset is only ever set from bytes the consumer has
      * already parsed, so there is never a reason to fetch them again. The
-     * If-Range condition means a host whose copy differs answers with the
-     * whole file instead, and the consumer starts over on that.
+     * consumer is told which version those bytes came from, and refuses a
+     * 206 that is not the same file.
      */
     var resume;
     if (resuming) {
-      resume = { offset: offset, validator: validator };
-      options = withHeaders(options, { Range: 'bytes=' + offset + '-', 'If-Range': validator });
+      resume = { offset: offset, version: version };
+      options = withHeaders(options, { Range: 'bytes=' + offset + '-' });
     }
     var headersArrived = false;
     return (options ? fetch(target, options) : fetch(target)).then(function (response) {
@@ -545,8 +563,11 @@ export function fetchWithRetry (url, attempts, init, consume) {
       if (!response.ok) {
         return Promise.reject({ status: response.status, message: 'HTTP ' + response.status + ' fetching ' + target });
       }
-      if (validator === null) {
-        validator = resumeValidator(response);
+      if (version === null) {
+        var seen = versionOf(response);
+        if (seen.etag !== null || seen.lastModified !== null) {
+          version = seen;
+        }
       }
       if (typeof consume !== 'function') {
         return { response: response, attempts: requests, resumes: resumes };
@@ -586,7 +607,7 @@ export function fetchWithRetry (url, attempts, init, consume) {
        * host answered with an error -- and whatever the consumer holds is
        * still good, so the offset stands and the next request asks from it.
        */
-      var resumable = canResume && offset > 0 && validator !== null;
+      var resumable = canResume && offset > 0 && version !== null;
       /*
        * A connection that was delivering and then dropped is an interruption,
        * not a failed attempt: it costs no strike and clears the ones before
