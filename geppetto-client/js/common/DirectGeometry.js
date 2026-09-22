@@ -187,45 +187,133 @@ export function objGeometryToRawType (id, geometry) {
   };
 }
 
+function header (response, name) {
+  try {
+    return (response && response.headers && typeof response.headers.get === 'function')
+      ? response.headers.get(name) : null;
+  } catch (ignore) {
+    return null;
+  }
+}
+
+/*
+ * The byte range a 206 actually carries: {start, total} from
+ * "bytes start-end/total", or null when the header is missing or not of
+ * that shape (a "*" total, say). A resume is only safe when start is
+ * exactly where the parse stopped.
+ */
+function contentRange (response) {
+  var value = header(response, 'content-range');
+  var m = /^\s*bytes\s+(\d+)-(\d+)\/(\d+|\*)\s*$/i.exec(value || '');
+  if (m === null) {
+    return null;
+  }
+  return { start: parseInt(m[1], 10), total: (m[3] === '*') ? NaN : parseInt(m[3], 10) };
+}
+
 /**
- * Parse an OBJ response body as it arrives.
+ * A consumer for fetchWithRetry that parses an OBJ body as it arrives and can
+ * carry on from where a dropped download stopped.
+ *
+ * The parser and the text decoder live across calls, so a resumed body is
+ * just more chunks to the same parse: the decoder keeps any split multi-byte
+ * character, the parser keeps any split line, and the bytes that follow are
+ * exactly the bytes that were missing. That only holds when the server gives
+ * back precisely the range asked for, so a resume is checked before a byte of
+ * it is fed in: anything other than a 206 starting at the parse position is
+ * taken as a fresh copy of the whole file and parsed from the top, discarding
+ * what was held. Feeding a full file into a half-fed parser would double its
+ * vertices without a single error being raised, which is the failure this
+ * guards against above all.
+ *
+ * @returns a function (response, resume) for fetchWithRetry, with
+ *          .resumable = true; resolves to {positions, indices, vertexCount,
+ *          faceCount}
+ */
+export function createObjConsumer () {
+  var parser = null;
+  var decoder = null;
+  /* Bytes fed to the parser so far, across every call: the resume offset. */
+  var consumed = 0;
+  var total = NaN;
+
+  var startOver = function () {
+    parser = createObjParser();
+    decoder = new TextDecoder('utf-8');
+    consumed = 0;
+    total = NaN;
+  };
+
+  var consume = function (response, resume) {
+    var continuing = false;
+    if (response.status === 206) {
+      var range = contentRange(response);
+      continuing = resume !== undefined && range !== null && parser !== null
+        && range.start === resume.offset && resume.offset === consumed;
+      if (!continuing) {
+        /*
+         * A range that is not the continuation asked for -- or one nobody
+         * asked for -- is a piece of the file, not the file. It cannot be
+         * spliced and it cannot be parsed as a whole either, so it is
+         * refused, and the state is cleared so the retry starts from the top.
+         */
+        startOver();
+        var refused = new Error('partial content that does not continue the download');
+        refused.bytesReceived = 0;
+        return Promise.reject(refused);
+      }
+      if (!isNaN(range.total)) {
+        total = range.total;
+      }
+    }
+    if (!continuing) {
+      startOver();
+      var declared = parseInt(header(response, 'content-length'), 10);
+      if (!isNaN(declared)) {
+        total = declared;
+      }
+    }
+    var reader = response.body.getReader();
+    var step = function () {
+      return reader.read().then(function (result) {
+        if (result.done) {
+          parser.push(decoder.decode());
+          var geometry = parser.finish();
+          startOver();
+          return geometry;
+        }
+        consumed += result.value.length;
+        parser.push(decoder.decode(result.value, { stream: true }));
+        return step();
+      }, function (failure) {
+        /*
+         * How far the download got, against the size the server declared:
+         * "died before a byte arrived" and "died three quarters through"
+         * are different problems, and this is also the offset a resume
+         * asks for. Nothing is flushed: a resume carries straight on.
+         */
+        if (failure && typeof failure === 'object') {
+          failure.bytesReceived = consumed;
+          if (!isNaN(total)) {
+            failure.contentLength = total;
+          }
+        }
+        throw failure;
+      });
+    };
+    return step();
+  };
+  consume.resumable = true;
+  return consume;
+}
+
+/**
+ * Parse one OBJ response body as it arrives, with no resumption.
  *
  * @returns a promise for {positions, indices, vertexCount, faceCount}
  */
 export function readObjStream (response) {
-  var parser = createObjParser();
-  var decoder = new TextDecoder('utf-8');
-  var reader = response.body.getReader();
-  /*
-   * How far the download got before a drop, against the size the server
-   * declared: the difference between "died before a byte arrived" and "died
-   * three quarters through" is exactly the kind of thing worth knowing when
-   * a fail can't be reproduced by hand.
-   */
-  var bytesRead = 0;
-  var declaredLength = (response.headers && typeof response.headers.get === 'function')
-    ? parseInt(response.headers.get('content-length'), 10)
-    : NaN;
-  var step = function () {
-    return reader.read().then(function (result) {
-      if (result.done) {
-        parser.push(decoder.decode());
-        return parser.finish();
-      }
-      bytesRead += result.value.length;
-      parser.push(decoder.decode(result.value, { stream: true }));
-      return step();
-    }, function (failure) {
-      if (failure && typeof failure === 'object') {
-        failure.bytesReceived = bytesRead;
-        if (!isNaN(declaredLength)) {
-          failure.contentLength = declaredLength;
-        }
-      }
-      throw failure;
-    });
-  };
-  return step();
+  return createObjConsumer()(response);
 }
 
 /**
@@ -551,7 +639,7 @@ export default function DirectGeometry (GEPPETTO) {
       var kind = interpreterKind(found.type.getModelInterpreterId());
       var url = fetchUrl(found.type.getUrl(), window.location.protocol);
       var startedAt = Date.now();
-      var report = function (ok, failure, attempts) {
+      var report = function (ok, failure, attempts, resumes) {
         try {
           GEPPETTO.trigger('geppetto:direct_geometry', {
             kind: kind,
@@ -559,7 +647,9 @@ export default function DirectGeometry (GEPPETTO) {
             ms: Date.now() - startedAt,
             path: path,
             reason: ok ? undefined : ((failure && failure.reason) ? failure.reason : failureReason(failure)),
+            /* requests made in all, and how many of them picked up a dropped download */
             attempts: attempts,
+            resumes: resumes || 0,
             call: callTag(url),
             midStream: ok ? undefined : (failure && failure.midStream === true),
             /*
@@ -585,16 +675,19 @@ export default function DirectGeometry (GEPPETTO) {
        * rather than expanded face by face. SWC is small and stays text.
        */
       var attemptsUsed = 1;
+      var resumesUsed = 0;
       /*
        * The body is read inside the retried call: a connection that drops
        * part-way through a 7 MB template used to surface as a failure after
        * one "successful" fetch and go straight to the server fallback. Now it
-       * is retried from the next host like a failed request.
+       * is retried from the next host like a failed request -- and for an
+       * OBJ, picked up from the last byte parsed rather than from the top.
        */
-      var consume = function (response) {
+      var objConsumer = createObjConsumer();
+      var consume = function (response, resume) {
         if (kind === 'obj' && response.body !== undefined && response.body !== null
           && typeof response.body.getReader === 'function' && typeof TextDecoder === 'function') {
-          return readObjStream(response).then(function (geometry) {
+          return objConsumer(response, resume).then(function (geometry) {
             if (geometry.vertexCount === 0) {
               throw new Error('no vertices parsed from ' + url);
             }
@@ -605,6 +698,10 @@ export default function DirectGeometry (GEPPETTO) {
              */
             return objGeometryToRawType(found.type.getId(), geometry);
           });
+        }
+        if (response.status === 206) {
+          // a range of a file this path reads whole is no use to it
+          return Promise.reject(new Error('partial content where a whole file was expected'));
         }
         return response.text().then(function (text) {
           if (kind === 'obj') {
@@ -617,19 +714,22 @@ export default function DirectGeometry (GEPPETTO) {
           return swcToRawType(found.type.getId(), text, ref);
         });
       };
+      consume.resumable = (kind === 'obj');
       fetchWithRetry(url, undefined, undefined, consume).then(function (result) {
         attemptsUsed = result.attempts;
+        resumesUsed = result.resumes || 0;
         return result.value;
       }).then(function (rawType) {
         var rawModel = wrapResolvedType(that.modelShape(), found.library.getId(), rawType);
         GEPPETTO.Manager.swapResolvedType(rawModel);
-        report(true, undefined, attemptsUsed);
+        report(true, undefined, attemptsUsed, resumesUsed);
         settle(true);
       }).catch(function (err) {
         console.error('DirectGeometry - could not resolve ' + path + ' after '
-          + (err && err.attempts ? err.attempts : attemptsUsed) + ' attempt(s) ('
+          + (err && err.attempts ? err.attempts : attemptsUsed) + ' request(s), '
+          + ((err && err.resumes) ? err.resumes : 0) + ' resumed ('
           + ((err && err.reason) ? err.reason : failureReason(err)) + '): ' + (err && err.message ? err.message : err));
-        report(false, err, (err && err.attempts) ? err.attempts : attemptsUsed);
+        report(false, err, (err && err.attempts) ? err.attempts : attemptsUsed, (err && err.resumes) ? err.resumes : 0);
         settle(false);
       });
     };

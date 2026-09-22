@@ -16,6 +16,13 @@
 /* Enough that a blip does not reach the user, few enough to stay quick. */
 export var ATTEMPTS = 4;
 export var BACKOFF_MS = [500, 2000, 5000];
+/*
+ * How many times one call may pick a dropped download back up where it left
+ * off (see fetchWithRetry). Each resume that gets further resets the attempt
+ * budget, so this is what bounds a link that keeps giving a little and then
+ * dying: at worst ATTEMPTS fresh tries between every one of these.
+ */
+export var RESUMES = 8;
 
 /*
  * Both are overridable at runtime (window.VFB_FETCH_ATTEMPTS,
@@ -34,6 +41,11 @@ function backoff (index) {
   var configured = (typeof window !== 'undefined') ? window.VFB_FETCH_BACKOFF_MS : undefined;
   var waits = (configured && configured.length) ? configured : BACKOFF_MS;
   return waits[Math.min(index, waits.length - 1)];
+}
+
+function resumeLimit () {
+  var configured = (typeof window !== 'undefined') ? window.VFB_FETCH_RESUMES : undefined;
+  return (typeof configured === 'number' && configured >= 0) ? configured : RESUMES;
 }
 
 /*
@@ -295,6 +307,60 @@ function withReloadCache (init) {
   return options;
 }
 
+/*
+ * The caller's fetch options with extra headers added, without mutating
+ * theirs. Headers end up as a plain object whatever they started as, so a
+ * caller's Headers instance and a test's object literal are treated alike.
+ */
+function withHeaders (init, extra) {
+  var options = {};
+  var headers = {};
+  if (init) {
+    for (var key in init) {
+      if (Object.prototype.hasOwnProperty.call(init, key)) {
+        options[key] = init[key];
+      }
+    }
+    var given = init.headers;
+    if (given && typeof given.forEach === 'function' && typeof given.get === 'function') {
+      given.forEach(function (value, name) {
+        headers[name] = value;
+      });
+    } else if (given) {
+      for (var name in given) {
+        if (Object.prototype.hasOwnProperty.call(given, name)) {
+          headers[name] = given[name];
+        }
+      }
+    }
+  }
+  for (var added in extra) {
+    if (Object.prototype.hasOwnProperty.call(extra, added)) {
+      headers[added] = extra[added];
+    }
+  }
+  options.headers = headers;
+  return options;
+}
+
+/*
+ * The validator a resume is conditioned on. Only a strong ETag will do: a
+ * weak one (W/"...") promises the same meaning, not the same bytes, and a
+ * resume is a byte-offset claim. Without one, a dropped download starts over.
+ */
+function strongEtag (response) {
+  try {
+    var tag = response && response.headers && typeof response.headers.get === 'function'
+      ? response.headers.get('etag') : null;
+    if (typeof tag !== 'string' || tag.length < 3 || /^W\//i.test(tag)) {
+      return null;
+    }
+    return tag;
+  } catch (ignore) {
+    return null;
+  }
+}
+
 function wait (ms) {
   return new Promise(function (resolve) {
     setTimeout(resolve, ms);
@@ -377,31 +443,67 @@ function diagnostics (freezesAtStart) {
  *
  * @param init - optional fetch options, for a caller that needs them (an
  *               AbortController signal, say). An abort is never retried.
- * @param consume - optional function (response) returning a promise for the
- *               value read from the body. It runs inside the attempt, so a
- *               connection dropped part-way through a stream is retried from
- *               the next host like any other failure, instead of surfacing
- *               after a "successful" fetch. Without it the caller reads the
- *               body itself and only the request is retried.
- * @returns a promise for {response, attempts, value}; rejects with an error
- *          carrying .reason, .attempts, .url and .host once the attempts are
- *          spent. A failure while the page is unloading has reason 'unload'
- *          and is not retried.
+ * @param consume - optional function (response, resume) returning a promise
+ *               for the value read from the body. It runs inside the attempt,
+ *               so a connection dropped part-way through a stream is retried
+ *               from the next host like any other failure, instead of
+ *               surfacing after a "successful" fetch. Without it the caller
+ *               reads the body itself and only the request is retried.
+ *
+ *               A consumer that sets consume.resumable = true is stateful and
+ *               can pick a dropped download up where it left off. It reports
+ *               how far it got as .bytesReceived on the failure it throws
+ *               (cumulative across calls), and on the next call receives
+ *               resume = {offset, etag} when the request asked for bytes from
+ *               that offset. It must then check the response: a 206 whose
+ *               Content-Range starts at the offset continues; anything else
+ *               (a 200 from a host that ignored the Range, or whose file no
+ *               longer matches the ETag) starts the parse over. A call with
+ *               no resume argument is a fresh download and must start over
+ *               whatever state the consumer holds.
+ * @returns a promise for {response, attempts, resumes, value}; rejects with an
+ *          error carrying .reason, .attempts, .resumes, .url and .host once the
+ *          attempts are spent. A failure while the page is unloading has
+ *          reason 'unload' and is not retried.
+ *
+ * Two kinds of failure, counted apart. A request that got nowhere -- refused,
+ * an HTTP error, a body that broke before a single new byte -- is a strike,
+ * and ATTEMPTS strikes end the call. A body that broke off after making
+ * progress is not a strike at all: it is a normal interruption on a long
+ * transfer, so the download is resumed from the last byte parsed (HTTP Range,
+ * conditioned on the file's ETag so a changed file restarts rather than
+ * splices), and the strike count goes back to zero. Nothing about a
+ * connection that was working and then wasn't says the method is wrong, and
+ * giving up the direct load for the server on that basis just re-fetches the
+ * same file over a worse channel. RESUMES bounds how many such interruptions
+ * one call will ride out, so a link that only ever trickles still ends.
  */
 export function fetchWithRetry (url, attempts, init, consume) {
   var limit = attemptLimit(attempts);
-  var tried = 0;
+  var resumeCap = resumeLimit();
+  var canResume = typeof consume === 'function' && consume.resumable === true;
+  var requests = 0;
+  var strikes = 0;
+  var resumes = 0;
   var lastReason = null;
   var freezesAtStart = freezeCount;
-  var attempt = function () {
-    tried++;
-    var first = (tried === 1);
+  /*
+   * Where the consumer has got to, and the validator that offset is good
+   * against. Both belong to the call, not the attempt: a resume on another
+   * host is still the same file at the same offset.
+   */
+  var offset = 0;
+  var etag = null;
+  var attempt = function (resuming) {
+    requests++;
+    var first = (requests === 1);
     /*
      * Each retry steps to the next host: the one that just failed is the
      * least promising place to ask again, whether it was marked down or
-     * merely answered with an error.
+     * merely answered with an error. A resume steps too -- every host serves
+     * the same bytes under the same ETag, and If-Range makes sure of it.
      */
-    var target = spreadUrl(url, tried - 1);
+    var target = spreadUrl(url, requests - 1);
     /*
      * The URL is never decorated: these files are cached as immutable by URL,
      * and a cache-busting parameter turned every retry into a full download
@@ -413,17 +515,32 @@ export function fetchWithRetry (url, attempts, init, consume) {
      */
     var bypass = !first && (lastReason === 'parse' || /^http/.test(lastReason || ''));
     var options = bypass ? withReloadCache(init) : init;
+    /*
+     * Ask for the rest of the file whenever there is a rest to ask for,
+     * strike or not: the offset is only ever set from bytes the consumer has
+     * already parsed, so there is never a reason to fetch them again. The
+     * ETag condition means a host whose copy differs answers with the whole
+     * file instead, and the consumer starts over on that.
+     */
+    var resume;
+    if (resuming) {
+      resume = { offset: offset, etag: etag };
+      options = withHeaders(options, { Range: 'bytes=' + offset + '-', 'If-Range': etag });
+    }
     var headersArrived = false;
     return (options ? fetch(target, options) : fetch(target)).then(function (response) {
       headersArrived = true;
       if (!response.ok) {
         return Promise.reject({ status: response.status, message: 'HTTP ' + response.status + ' fetching ' + target });
       }
-      if (typeof consume !== 'function') {
-        return { response: response, attempts: tried };
+      if (etag === null) {
+        etag = strongEtag(response);
       }
-      return Promise.resolve(consume(response)).then(function (value) {
-        return { response: response, attempts: tried, value: value };
+      if (typeof consume !== 'function') {
+        return { response: response, attempts: requests, resumes: resumes };
+      }
+      return Promise.resolve(consume(response, resume)).then(function (value) {
+        return { response: response, attempts: requests, resumes: resumes, value: value };
       });
     }).catch(function (failure) {
       var reason = failureReason(failure);
@@ -440,8 +557,43 @@ export function fetchWithRetry (url, attempts, init, consume) {
       if (reason === 'network' && !headersArrived) {
         markHostDown(hostOf(target));
       }
-      if (tried < limit && reason !== 'unload' && worthRetrying(failure)) {
-        return wait(backoff(tried - 1)).then(attempt);
+      /*
+       * Did this attempt get the download further than it was? The consumer
+       * reports its cumulative position; anything past the last one is
+       * progress. A consumer that had to start over reports a smaller
+       * number, which counts as no progress -- correctly, since the old
+       * offset is gone.
+       */
+      var progressed = false;
+      if (failure && typeof failure.bytesReceived === 'number') {
+        progressed = headersArrived && failure.bytesReceived > offset;
+        offset = failure.bytesReceived;
+      }
+      /*
+       * Otherwise the body was never read -- the request was refused or the
+       * host answered with an error -- and whatever the consumer holds is
+       * still good, so the offset stands and the next request asks from it.
+       */
+      var resumable = canResume && offset > 0 && etag !== null;
+      /*
+       * A connection that was delivering and then dropped is an interruption,
+       * not a failed attempt: it costs no strike and clears the ones before
+       * it. Only up to the cap, so a link that never gets far still ends --
+       * and only when the download can actually be picked up, since starting
+       * over is a full attempt however far the last one got.
+       */
+      if (resumable && progressed && reason === 'network' && resumes < resumeCap) {
+        resumes++;
+        strikes = 0;
+        return wait(backoff(0)).then(function () {
+          return attempt(resumable);
+        });
+      }
+      strikes++;
+      if (strikes < limit && reason !== 'unload' && worthRetrying(failure)) {
+        return wait(backoff(strikes - 1)).then(function () {
+          return attempt(resumable);
+        });
       }
       var err = new Error((failure && failure.message) ? failure.message : String(failure));
       /*
@@ -453,7 +605,8 @@ export function fetchWithRetry (url, attempts, init, consume) {
         err.name = failure.name;
       }
       err.reason = reason;
-      err.attempts = tried;
+      err.attempts = requests;
+      err.resumes = resumes;
       err.url = url;
       err.host = hostOf(target);
       err.midStream = headersArrived;
@@ -464,6 +617,9 @@ export function fetchWithRetry (url, attempts, init, consume) {
        */
       if (failure && typeof failure.bytesReceived === 'number') {
         err.bytesReceived = failure.bytesReceived;
+      } else if (offset > 0) {
+        // the last request never read a body, but earlier ones got this far
+        err.bytesReceived = offset;
       }
       if (failure && typeof failure.contentLength === 'number') {
         err.contentLength = failure.contentLength;
@@ -477,7 +633,7 @@ export function fetchWithRetry (url, attempts, init, consume) {
       throw err;
     });
   };
-  return attempt();
+  return attempt(false);
 }
 
 /**

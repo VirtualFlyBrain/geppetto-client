@@ -701,3 +701,224 @@ test('a body with no headers at all still fails cleanly (no content-length to re
   expect(caught.bytesReceived).toBe('v 0 0 0\n'.length);
   expect(caught.contentLength).toBeUndefined();
 });
+
+/*
+ * Resuming a dropped download. A server that honours Range (every VFB data
+ * host does, with the same strong ETag on each) lets a body that broke off
+ * carry on from the last byte parsed instead of starting over -- and a drop
+ * that made progress is not a failed attempt, so a long transfer on a weak
+ * link is not thrown to the server fallback for being interrupted.
+ */
+const OBJ = 'v 0 0 0\nv 1 0 0\nv 0 1 0\nv 1 1 0\nf 1 2 3\nf 2 3 4\n';
+const ETAG = '"6a2738c9-6e6640"';
+
+/*
+ * An OBJ server for the fetch mock. Each request is served according to the
+ * plan entry for its index: {drop} drops the body after that many NEW bytes,
+ * {ignoreRange} answers a Range request with the whole file (200), {shift}
+ * answers with a range starting that many bytes off, {noEtag} omits the
+ * validator. Records what each request asked for.
+ */
+function objServer (plan, opts = {}) {
+  const enc = new nodeUtil.TextEncoder();
+  const bytes = enc.encode(OBJ);
+  const seen = [];
+  const fetch = jest.fn((target, options) => {
+    const i = seen.length;
+    const p = plan[i] || {};
+    const headers = (options && options.headers) || {};
+    const rangeHeader = headers.Range || headers.range;
+    seen.push({ host: RetryFetch.hostOf(target), range: rangeHeader, ifRange: headers['If-Range'], cache: options && options.cache });
+    let start = 0;
+    let status = 200;
+    const hdr = {};
+    if (rangeHeader && !p.ignoreRange) {
+      start = parseInt(/bytes=(\d+)-/.exec(rangeHeader)[1], 10) + (p.shift || 0);
+      status = 206;
+      hdr['content-range'] = 'bytes ' + start + '-' + (bytes.length - 1) + '/' + bytes.length;
+    }
+    const body = bytes.subarray(start);
+    hdr['content-length'] = String(body.length);
+    if (!p.noEtag && !opts.noEtag) { hdr.etag = ETAG; }
+    // serve in 4-byte chunks so a drop lands mid-line
+    let pos = 0;
+    return Promise.resolve({
+      ok: true,
+      status,
+      headers: { get: k => (hdr[k.toLowerCase()] === undefined ? null : hdr[k.toLowerCase()]) },
+      body: {
+        getReader: () => ({
+          read: () => {
+            if (p.drop !== undefined && pos >= p.drop) {
+              return Promise.reject(new TypeError('network error'));
+            }
+            if (pos >= body.length) { return Promise.resolve({ done: true }); }
+            const chunk = body.subarray(pos, Math.min(pos + 4, body.length, p.drop === undefined ? Infinity : p.drop));
+            pos += chunk.length;
+            return Promise.resolve({ done: false, value: chunk });
+          },
+          cancel: () => Promise.resolve(),
+          releaseLock: () => null
+        })
+      }
+    });
+  });
+  return { fetch, seen };
+}
+
+const spreadHosts = () => {
+  RetryFetch.resetHosts();
+  window.VFB_DATA_HOSTS = ['buttermilk', 'parsley', 'sourcream'].map(n => n + '.virtualflybrain.org').join(',');
+};
+const URL_OBJ = 'https://www.virtualflybrain.org/data/VFB/i/0010/1567/VFB_00101567/volume.obj';
+const loadObj = () => RetryFetch.fetchWithRetry(URL_OBJ, undefined, undefined, DirectGeometryModule.createObjConsumer());
+const whole = { vertexCount: 4, faceCount: 2 };
+
+afterEach(() => {
+  delete window.VFB_DATA_HOSTS;
+  delete window.VFB_FETCH_RESUMES;
+});
+
+test('a body that drops part-way is resumed from the last byte parsed, on the next host', async () => {
+  spreadHosts();
+  const server = objServer([{ drop: 21 }, {}]);
+  global.fetch = server.fetch;
+  const result = await loadObj();
+  expect(result.value).toMatchObject(whole);
+  expect(result.attempts).toBe(2);
+  expect(result.resumes).toBe(1);
+  expect(server.seen[0].range).toBeUndefined();
+  // 21 bytes = "v 0 0 0\nv 1 0 0\nv 0 1" -- resumed mid-line
+  expect(server.seen[1].range).toBe('bytes=21-');
+  expect(server.seen[1].ifRange).toBe(ETAG);
+  // a resume is a dropped connection, never a cache bypass
+  expect(server.seen[1].cache).toBeUndefined();
+  expect(server.seen[1].host).not.toBe(server.seen[0].host);
+});
+
+test('drops that made progress do not use up the attempts', async () => {
+  spreadHosts();
+  // six interruptions, each a little further on, against a budget of four attempts
+  const server = objServer([{ drop: 4 }, { drop: 4 }, { drop: 4 }, { drop: 4 }, { drop: 4 }, { drop: 4 }, {}]);
+  global.fetch = server.fetch;
+  const result = await loadObj();
+  expect(result.value).toMatchObject(whole);
+  expect(result.attempts).toBe(7);
+  expect(result.resumes).toBe(6);
+  expect(server.seen.map(s => s.range)).toEqual([undefined, 'bytes=4-', 'bytes=8-', 'bytes=12-', 'bytes=16-', 'bytes=20-', 'bytes=24-']);
+});
+
+test('drops that made no progress are strikes, and four of them end the call', async () => {
+  spreadHosts();
+  const server = objServer([{ drop: 0 }, { drop: 0 }, { drop: 0 }, { drop: 0 }, {}]);
+  global.fetch = server.fetch;
+  let caught = null;
+  try { await loadObj(); } catch (e) { caught = e; }
+  expect(caught.reason).toBe('network');
+  expect(caught.attempts).toBe(4);
+  expect(caught.resumes).toBe(0);
+  // nothing to resume from, so never a Range request
+  server.seen.forEach(s => expect(s.range).toBeUndefined());
+});
+
+test('progress resets the strike count', async () => {
+  spreadHosts();
+  // three strikes, then progress, then three more strikes: only survivable if progress reset the count
+  const server = objServer([
+    { drop: 0 }, { drop: 0 }, { drop: 0 },
+    { drop: 8 },
+    { drop: 0 }, { drop: 0 }, { drop: 0 },
+    {}
+  ]);
+  global.fetch = server.fetch;
+  const result = await loadObj();
+  expect(result.value).toMatchObject(whole);
+  expect(result.attempts).toBe(8);
+  expect(result.resumes).toBe(1);
+  // the strikes after the progress drop still ask from where it got to: those bytes are parsed, never refetched
+  expect(server.seen.slice(4).map(s => s.range)).toEqual(['bytes=8-', 'bytes=8-', 'bytes=8-', 'bytes=8-']);
+});
+
+test('a host that answers a Range request with the whole file is parsed from the top, not spliced', async () => {
+  spreadHosts();
+  const server = objServer([{ drop: 21 }, { ignoreRange: true }]);
+  global.fetch = server.fetch;
+  const result = await loadObj();
+  // the guard this exists for: no doubled vertices
+  expect(result.value).toMatchObject(whole);
+  expect(result.resumes).toBe(1);
+});
+
+test('a range that does not start where the parse stopped is refused, and the next request starts over', async () => {
+  spreadHosts();
+  const server = objServer([{ drop: 21 }, { shift: -8 }, {}]);
+  global.fetch = server.fetch;
+  const result = await loadObj();
+  // a piece of the file is neither spliceable nor a whole file: it must never yield a truncated mesh
+  expect(result.value).toMatchObject(whole);
+  expect(result.attempts).toBe(3);
+  expect(result.resumes).toBe(1);
+  expect(server.seen[1].range).toBe('bytes=21-');
+  expect(server.seen[2].range).toBeUndefined();
+});
+
+test('without a strong ETag a dropped download starts over and the drop is a strike', async () => {
+  spreadHosts();
+  const server = objServer([{ drop: 21 }, {}], { noEtag: true });
+  global.fetch = server.fetch;
+  const result = await loadObj();
+  expect(result.value).toMatchObject(whole);
+  expect(result.attempts).toBe(2);
+  expect(result.resumes).toBe(0);
+  expect(server.seen[1].range).toBeUndefined();
+});
+
+test('a link that only ever trickles is bounded by the resume cap', async () => {
+  spreadHosts();
+  window.VFB_FETCH_RESUMES = 2;
+  const server = objServer(Array.from({ length: 20 }, () => ({ drop: 2 })));
+  global.fetch = server.fetch;
+  let caught = null;
+  try { await loadObj(); } catch (e) { caught = e; }
+  expect(caught.reason).toBe('network');
+  expect(caught.resumes).toBe(2);
+  // the first request, two free resumes, then the four strikes that end it -- each still asking from where it got to
+  expect(caught.attempts).toBe(6);
+  expect(server.seen.map(s => s.range)).toEqual([undefined, 'bytes=2-', 'bytes=4-', 'bytes=6-', 'bytes=8-', 'bytes=10-']);
+  // the exhausted failure still says how far it got in all
+  expect(caught.bytesReceived).toBe(12);
+  expect(caught.contentLength).toBe(OBJ.length);
+});
+
+test('a resolve that resumed reports the resume', async () => {
+  loadTerm();
+  spreadHosts();
+  const server = objServer([{ drop: 21 }, {}]);
+  global.fetch = server.fetch;
+  delete window.location;
+  window.location = { protocol: 'https:' };
+  GEPPETTO.DirectGeometry.enabled = true;
+  const done = new Promise(resolve => GEPPETTO.Manager.resolveImportType('Model.OBJLibrary.VFB_jrmc2yzg_obj', resolve));
+  await done;
+  const report = events.find(e => e[0] === 'geppetto:direct_geometry');
+  expect(report[1].ok).toBe(true);
+  expect(report[1].attempts).toBe(2);
+  expect(report[1].resumes).toBe(1);
+  expect(typeAt('OBJLibrary', 'VFB_jrmc2yzg_obj').getMetaType()).toBe('VisualType');
+});
+
+test('an HTTP error on a resume keeps the offset: the next request asks from the same place', async () => {
+  spreadHosts();
+  const server = objServer([{ drop: 21 }, { status: 503 }, {}]);
+  // the plan's status is honoured by wrapping the server: a 503 never reaches the body
+  const inner = server.fetch;
+  global.fetch = jest.fn((t, o) => inner(t, o).then(r => (server.seen.length === 2 ? { ok: false, status: 503 } : r)));
+  const result = await loadObj();
+  expect(result.value).toMatchObject(whole);
+  expect(result.attempts).toBe(3);
+  expect(result.resumes).toBe(1);
+  expect(server.seen[1].range).toBe('bytes=21-');
+  expect(server.seen[2].range).toBe('bytes=21-');
+  // an HTTP error bypasses the cache on the retry, Range or not
+  expect(server.seen[2].cache).toBe('reload');
+});
