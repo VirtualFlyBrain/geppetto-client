@@ -97,3 +97,21 @@ test('a missing model is reported, and nothing is half-loaded', async () => {
   expect(failed[1]).toMatchObject({ url: 'https://h/vfb.xmi', reason: 'http404' });
   expect(events.some(e => e[0] === 'spinner:hide')).toBe(true);
 });
+
+test('a project already in hand boots without fetching anything', () => {
+  global.fetch = jest.fn();
+  const model = new ProjectLoader(GEPPETTO).boot(descriptor, xmi);
+  expect(global.fetch).not.toHaveBeenCalled();
+  expect(calls.map(c => c[0])).toEqual(['privileges', 'project', 'model', 'experiment']);
+  expect(model).toStrictEqual(server);
+  // the caller's descriptor is not changed
+  expect(descriptor.id).toBe(1);
+  expect(descriptor.view).toBeUndefined();
+});
+
+test('a model that will not convert is reported like one that would not load', () => {
+  const loader = new ProjectLoader(GEPPETTO);
+  expect(() => loader.bootOrReport(descriptor, '<not xml')).toThrow(/well-formed/);
+  expect(events.find(e => e[0] === 'geppetto:project_load_failed')[1]).toMatchObject({ url: 'the built-in model' });
+  expect(calls).toEqual([]);
+});

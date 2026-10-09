@@ -52,9 +52,56 @@ export default function ProjectLoader (GEPPETTO) {
   };
 
   /**
+   * Load a project whose descriptor and model XMI are already in hand (VFB
+   * builds both into its bundle, so nothing is fetched). Runs the three steps
+   * the server's replies used to drive, in their order. Returns the model.
+   */
+  this.boot = function (descriptor, xmi) {
+    var project = JSON.parse(JSON.stringify(descriptor));
+    var model = xmiToModel(xmi);
+    /*
+     * The server gave every load a fresh project id. Views are kept in
+     * localStorage under it, so a fixed id would bring one visit's
+     * layout back on the next; keep it fresh.
+     */
+    project.id = Math.floor(Math.random() * 2147483647);
+    project.isPublic = false;
+    if (project.view === undefined) {
+      project.view = { id: 1, viewStates: '{"views":{}}' };
+    }
+    GEPPETTO.UserController.setUserPrivileges(GUEST);
+    GEPPETTO.Manager.loadProject(project, false);
+
+    console.time(GEPPETTO.Resources.PARSING_MODEL);
+    GEPPETTO.trigger(GEPPETTO.Events.Show_spinner, GEPPETTO.Resources.PARSING_MODEL);
+    GEPPETTO.Manager.loadModel(model);
+    var experimentId = project.activeExperimentId;
+    if (experimentId === undefined || experimentId === null || experimentId === -1) {
+      GEPPETTO.ViewController.resolveViews();
+    } else {
+      GEPPETTO.Manager.loadExperiment(experimentId, initialExperimentState(model, project.id, experimentId));
+    }
+    return model;
+  };
+
+  /**
+   * Load a project already in hand, reporting a failure the same way as a
+   * fetched one (geppetto:project_load_failed).
+   */
+  this.bootOrReport = function (descriptor, xmi, label) {
+    try {
+      return this.boot(descriptor, xmi);
+    } catch (err) {
+      failed(label || 'the built-in model', err);
+      throw err;
+    }
+  };
+
+  /**
    * Fetch and load the project at projectURL. Resolves with the model.
    */
   this.load = function (projectURL) {
+    var that = this;
     var url = pageSafe(projectURL);
     var project;
     var modelUrl = url;
@@ -63,30 +110,7 @@ export default function ProjectLoader (GEPPETTO) {
       modelUrl = new URL(String(project.geppettoModel.url).replace(/^\/+/, ''), url).href;
       return read(modelUrl, 'text');
     }).then(function (xmi) {
-      var model = xmiToModel(xmi);
-      /*
-       * The server gave every load a fresh project id. Views are kept in
-       * localStorage under it, so a fixed id would bring one visit's
-       * layout back on the next; keep it fresh.
-       */
-      project.id = Math.floor(Math.random() * 2147483647);
-      project.isPublic = false;
-      if (project.view === undefined) {
-        project.view = { id: 1, viewStates: '{"views":{}}' };
-      }
-      GEPPETTO.UserController.setUserPrivileges(GUEST);
-      GEPPETTO.Manager.loadProject(project, false);
-
-      console.time(GEPPETTO.Resources.PARSING_MODEL);
-      GEPPETTO.trigger(GEPPETTO.Events.Show_spinner, GEPPETTO.Resources.PARSING_MODEL);
-      GEPPETTO.Manager.loadModel(model);
-      var experimentId = project.activeExperimentId;
-      if (experimentId === undefined || experimentId === null || experimentId === -1) {
-        GEPPETTO.ViewController.resolveViews();
-      } else {
-        GEPPETTO.Manager.loadExperiment(experimentId, initialExperimentState(model, project.id, experimentId));
-      }
-      return model;
+      return that.boot(project, xmi);
     }).catch(function (err) {
       failed(project === undefined ? url : modelUrl, err);
       throw err;

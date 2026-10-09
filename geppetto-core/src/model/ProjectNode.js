@@ -219,11 +219,36 @@ define(['backbone'], function (require) {
     },
 
     /**
-     * Loads a project from content. Needed the Geppetto server.
+     * Loads a project from content already in hand: its JSON descriptor and
+     * the model XMI it names. Nothing is fetched. Runs on the next tick, as
+     * a fetched project would, so listeners registered while the page is
+     * still mounting hear the load.
+     *
+     * @command Project.loadFromContent(descriptor, xmi)
+     * @param {Object} descriptor - the project descriptor (e.g. vfb.json)
+     * @param {String} xmi - the model XMI it names
+     * @returns {String}  Status of attempt to load project
      */
-    loadFromContent: function (content) {
-      console.error('Project.loadFromContent needs a Geppetto server; use Project.loadFromURL');
-      return GEPPETTO.Resources.PROJECT_UNSPECIFIED;
+    loadFromContent: function (descriptor, xmi) {
+      if (!descriptor || typeof xmi !== 'string' || xmi.length === 0) {
+        console.error('Project.loadFromContent needs the project descriptor and its model XMI');
+        return GEPPETTO.Resources.PROJECT_UNSPECIFIED;
+      }
+      GEPPETTO.WidgetsListener.update(GEPPETTO.WidgetsListener.WIDGET_EVENT_TYPE.DELETE);
+      console.time(GEPPETTO.Resources.LOADING_PROJECT);
+      GEPPETTO.trigger(GEPPETTO.Events.Project_loading);
+      GEPPETTO.trigger(GEPPETTO.Events.Show_spinner, GEPPETTO.Resources.LOADING_PROJECT);
+      this.persisted = false;
+      this.initializationTime = new Date();
+      setTimeout(function () {
+        try {
+          GEPPETTO.ProjectLoader.bootOrReport(descriptor, xmi);
+        } catch (ignore) {
+          // reported by the loader
+        }
+      }, 0);
+      GEPPETTO.trigger(GEPPETTO.Events.Simulation_restarted);
+      return GEPPETTO.Resources.LOADING_PROJECT;
     },
 
     saveProjectProperties: function (properties) {
