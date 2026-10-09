@@ -14,98 +14,49 @@ define(function (require) {
         = {
 
         /**
-         *
-         * * Run a set of queries on this datasource
+         * Run a set of queries. A vfbquery query is fetched from v3-cached
+         * and its table built here, as the server did; no other kind can
+         * run without the server.
          *
          * @param queries
-         * @param callback
+         * @param callback - (serialised QueryResults)
+         * @param onFailed - (error)
          */
-        runQuery: function (queries, callback, offset, limit) {
-          /*
-           * A vfbquery query needs no server state: fetch v3-cached here and
-           * format the table as the server did. Anything else, or a failed
-           * fetch, goes to the server as before.
-           */
-          var that = this;
-          if (GEPPETTO.DirectQueries !== undefined && GEPPETTO.DirectQueries.canRun(queries)) {
-            GEPPETTO.DirectQueries.run(queries, callback, offset, limit, function () {
-              that.runQueryOnServer(queries, callback, offset, limit);
-            });
+        runQuery: function (queries, callback, offset, limit, onFailed) {
+          if (GEPPETTO.DirectQueries === undefined || !GEPPETTO.DirectQueries.canRun(queries)) {
+            GEPPETTO.Manager.requestFailed('run_query', this.describe(queries), new Error('no client-side runner for this query'), onFailed);
             return;
           }
-          this.runQueryOnServer(queries, callback, offset, limit);
-        },
-
-        runQueryOnServer: function (queries, callback, offset, limit) {
-          var compoundQuery = [];
-          for (var i = 0;i < queries.length;i++) {
-            compoundQuery.push({
-              targetVariablePath: queries[i].target.getPath().replace(GEPPETTO.Resources.MODEL_PREFIX_CLIENT + ".", ''), 
-              queryPath: queries[i].query.getPath().replace(GEPPETTO.Resources.MODEL_PREFIX_CLIENT + ".", '')
-            });
-          }
-
-          var parameters = {};
-          parameters["projectId"] = Project.getId();
-          parameters["runnableQueries"] = compoundQuery;
-          if (offset !== undefined && offset !== null) {
-            parameters["offset"] = offset;
-          }
-          if (limit !== undefined && limit !== null) {
-            parameters["limit"] = limit;
-          }
-
-          var c = callback;
-          GEPPETTO.MessageSocket.send("run_query", parameters, function (data){
-            var queryResults = JSON.parse(data)["return_query_results"];
-            if (c != undefined){
-              c(queryResults);
-            }
+          GEPPETTO.DirectQueries.run(queries, callback, offset, limit, function (err) {
+            GEPPETTO.Manager.requestFailed('run_query', GEPPETTO.QueriesController.describe(queries), err, onFailed);
           });
         },
 
-
         /**
-         * Get the count for a set of queries on this datasource
+         * Get the count for a set of queries
          *
          * @param queries
-         * @param callback
+         * @param callback - (count)
+         * @param onFailed - (error)
          */
-        getQueriesCount: function (queries, callback) {
-          var that = this;
-          if (GEPPETTO.DirectQueries !== undefined && GEPPETTO.DirectQueries.canRun(queries)) {
-            GEPPETTO.DirectQueries.count(queries, callback, function () {
-              that.getQueriesCountOnServer(queries, callback);
-            });
+        getQueriesCount: function (queries, callback, onFailed) {
+          if (!queries || queries.length === 0) {
+            callback(0);
             return;
           }
-          this.getQueriesCountOnServer(queries, callback);
+          if (GEPPETTO.DirectQueries === undefined || !GEPPETTO.DirectQueries.canRun(queries)) {
+            GEPPETTO.Manager.requestFailed('run_query_count', this.describe(queries), new Error('no client-side runner for this query'), onFailed);
+            return;
+          }
+          GEPPETTO.DirectQueries.count(queries, callback, function (err) {
+            GEPPETTO.Manager.requestFailed('run_query_count', GEPPETTO.QueriesController.describe(queries), err, onFailed);
+          });
         },
 
-        getQueriesCountOnServer: function (queries, callback) {
-          if (queries.length > 0){
-            var compoundQuery = [];
-            for (var i = 0;i < queries.length;i++) {
-              compoundQuery.push({
-                targetVariablePath: queries[i].target.getPath().replace(GEPPETTO.Resources.MODEL_PREFIX_CLIENT + ".", ''), 
-                queryPath: queries[i].query.getPath().replace(GEPPETTO.Resources.MODEL_PREFIX_CLIENT + ".", '') 
-              });
-            }
-  
-            var parameters = {};
-            parameters["projectId"] = Project.getId();
-            parameters["runnableQueries"] = compoundQuery;
-  
-            var c = callback;
-            GEPPETTO.MessageSocket.send("run_query_count", parameters, function (data){
-              var count = JSON.parse(data)["return_query_count"];
-              if (c != undefined){
-                c(count);
-              }
-            });
-          } else {
-            callback(0);
-          }
+        describe: function (queries) {
+          return (queries || []).map(function (q) {
+            return (q.query ? q.query.getId() : '?') + '(' + (q.target ? q.target.getId() : '?') + ')';
+          });
         }
       }
   }

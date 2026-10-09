@@ -506,11 +506,8 @@ export function fetchUrl (url, pageProtocol) {
 
 /**
  * The runtime half: resolves import types against the live client model.
- * Off unless the application turns it on (GEPPETTO.DirectGeometry.enabled).
  */
 export default function DirectGeometry (GEPPETTO) {
-
-  this.enabled = false;
 
   /**
    * Find an ImportType in the client model by its path (Model. prefix
@@ -571,13 +568,9 @@ export default function DirectGeometry (GEPPETTO) {
   };
 
   /**
-   * Can every one of these paths be resolved here? Mixed lists go to the
-   * server whole so the caller's single callback keeps its meaning.
+   * Can every one of these paths be resolved here (an OBJ or SWC import)?
    */
   this.canResolve = function (typePaths) {
-    if (!this.enabled) {
-      return false;
-    }
     for (var i = 0; i < typePaths.length; i++) {
       var found = this.findImportType(typePaths[i]);
       if (found === null || interpreterKind(found.type.getModelInterpreterId()) === null) {
@@ -589,7 +582,7 @@ export default function DirectGeometry (GEPPETTO) {
 
   /**
    * Resolve the import types in place. Calls callback() once all are merged,
-   * or fallback(paths) if anything failed so the caller can go to the server.
+   * or failed(paths, error) if any could not be.
    */
   /*
    * VFB asks for the same import more than once while a term loads (the
@@ -598,61 +591,44 @@ export default function DirectGeometry (GEPPETTO) {
    */
   var inFlight = {};
 
-  this.resolve = function (typePaths, callback, fallback) {
+  this.resolve = function (typePaths, callback, failed) {
     var that = this;
     var pending = typePaths.length;
-    var failed = false;
-    /*
-     * The server can only resolve imports of terms it built itself. For one
-     * this client built (VFB2 #502 phase 2) it answers "Couldn't find a type
-     * for the path ...", so a failure here is the end of it: report it and
-     * let the application decide what to show instead.
-     */
-    var serverKnows = function (paths) {
-      var built = (GEPPETTO.DirectTermInfo !== undefined) ? GEPPETTO.DirectTermInfo.builtHere : undefined;
-      if (built === undefined) {
-        return true;
-      }
-      for (var i = 0; i < paths.length; i++) {
-        var leaf = paths[i].split('.').pop();
-        if (built[leaf.replace(/_(obj|swc)$/, '')] === true) {
-          return false;
-        }
-      }
-      return true;
-    };
+    var lastError = null;
     GEPPETTO.trigger('spin_logo');
     var done = function () {
       pending--;
       if (pending === 0) {
         GEPPETTO.trigger('stop_spin_logo');
-        if (failed && serverKnows(typePaths)) {
-          fallback(typePaths);
-        } else if (callback !== undefined && !failed) {
+        if (lastError !== null) {
+          if (typeof failed === 'function') {
+            failed(typePaths, lastError);
+          }
+        } else if (callback !== undefined) {
           callback();
         }
       }
     };
     var one = function (path) {
       if (inFlight[path] !== undefined) {
-        inFlight[path].push(function (ok) {
-          if (!ok) {
-            failed = true;
+        inFlight[path].push(function (err) {
+          if (err !== null) {
+            lastError = err;
           }
           done();
         });
         return;
       }
       inFlight[path] = [];
-      var settle = function (ok) {
+      var settle = function (err) {
         var waiters = inFlight[path];
         delete inFlight[path];
-        if (!ok) {
-          failed = true;
+        if (err !== null) {
+          lastError = err;
         }
         done();
         for (var w = 0; w < waiters.length; w++) {
-          waiters[w](ok);
+          waiters[w](err);
         }
       };
       var found = that.findImportType(path);
@@ -699,7 +675,7 @@ export default function DirectGeometry (GEPPETTO) {
       /*
        * The body is read inside the retried call: a connection that drops
        * part-way through a 7 MB template used to surface as a failure after
-       * one "successful" fetch and go straight to the server fallback. Now it
+       * one "successful" fetch and gave up. Now it
        * is retried from the next host like a failed request -- and for an
        * OBJ, picked up from the last byte parsed rather than from the top.
        */
@@ -743,14 +719,14 @@ export default function DirectGeometry (GEPPETTO) {
         var rawModel = wrapResolvedType(that.modelShape(), found.library.getId(), rawType);
         GEPPETTO.Manager.swapResolvedType(rawModel);
         report(true, undefined, attemptsUsed, resumesUsed);
-        settle(true);
+        settle(null);
       }).catch(function (err) {
         console.error('DirectGeometry - could not resolve ' + path + ' after '
           + (err && err.attempts ? err.attempts : attemptsUsed) + ' request(s), '
           + ((err && err.resumes) ? err.resumes : 0) + ' resumed ('
           + ((err && err.reason) ? err.reason : failureReason(err)) + '): ' + (err && err.message ? err.message : err));
         report(false, err, (err && err.attempts) ? err.attempts : attemptsUsed, (err && err.resumes) ? err.resumes : 0);
-        settle(false);
+        settle(err || new Error('could not resolve ' + path));
       });
     };
     for (var i = 0; i < typePaths.length; i++) {

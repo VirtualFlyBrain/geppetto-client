@@ -84,14 +84,13 @@ define(function (require) {
   require('../../common/GEPPETTO.Utility')(GEPPETTO);
   require('../../components/widgets/MenuManager')(GEPPETTO);
   require('../../communication/MessageSocket')(GEPPETTO);
-  require('../../communication/GEPPETTO.GlobalHandler')(GEPPETTO);
 
   GEPPETTO.Manager = new(require('../../common/Manager').default)();
   GEPPETTO.DirectGeometry = new(require('../../common/DirectGeometry').default)(GEPPETTO);
   GEPPETTO.DirectTermInfo = new(require('../../common/DirectTermInfo').default)(GEPPETTO);
   GEPPETTO.DirectQueries = new(require('../../common/DirectQueries').default)(GEPPETTO);
+  GEPPETTO.ProjectLoader = new(require('../../common/ProjectLoader').default)(GEPPETTO);
 
-  require('../../communication/MessageHandler')(GEPPETTO);
   require('./G')(GEPPETTO);
   require('./GEPPETTO.Main')(GEPPETTO);
   require("../../components/widgets/includeWidget")(GEPPETTO);

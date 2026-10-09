@@ -32,7 +32,7 @@ GEPPETTO.CommandController = { log: () => null, createTags: () => null };
 GEPPETTO.DirectTermInfo = new DirectTermInfo(GEPPETTO);
 console.warn = () => null;
 /*
- * A failed fetch is retried before anything falls back to the server. The
+ * A failed fetch is retried before it is reported. The
  * tests want the retries, not the waiting between them.
  */
 window.VFB_FETCH_BACKOFF_MS = [0, 0, 0];
@@ -120,7 +120,7 @@ test('merging the client model gives the same objects as merging the server repl
   expect(fromClient.no_such_id_xyz.variable.anonymousTypes[0].superType.length).toBe(1);
 });
 
-test('Manager.fetchVariables goes to the client for the term info datasource when enabled', async () => {
+test('Manager.fetchVariables builds a term info datasource\'s terms in the client', async () => {
   freshModel();
   global.fetch = jest.fn(url => {
     const id = decodeURIComponent(url.split('id=')[1]);
@@ -130,13 +130,7 @@ test('Manager.fetchVariables goes to the client for the term info datasource whe
   window.location = { protocol: 'https:' };
   window.Model = {};
 
-  GEPPETTO.DirectTermInfo.enabled = false;
-  GEPPETTO.Manager.fetchVariables(['FBbt_00003676'], 'vfbqueryTermInfo', () => null);
-  expect(GEPPETTO.MessageSocket.send).toHaveBeenCalledWith('fetch_variable', expect.objectContaining({ variableId: ['FBbt_00003676'], dataSourceId: 'vfbqueryTermInfo' }), expect.any(Function));
-  expect(global.fetch).not.toHaveBeenCalled();
-
   GEPPETTO.MessageSocket.send.mockClear();
-  GEPPETTO.DirectTermInfo.enabled = true;
   expect(GEPPETTO.DirectTermInfo.canFetch('vfbqueryTermInfo')).toBe(true);
   expect(GEPPETTO.DirectTermInfo.canFetch('neo4JDataSourceService')).toBe(false);
   await new Promise(resolve => GEPPETTO.Manager.fetchVariables('FBbt_00003676', 'vfbqueryTermInfo', resolve));
@@ -149,7 +143,7 @@ test('Manager.fetchVariables goes to the client for the term info datasource whe
   expect(events.some(e => e[0] === 'stop_spin_logo')).toBe(true);
 });
 
-test('a failed fetch falls back to the server for the ids not yet merged', async () => {
+test('a failed fetch reports the ids not yet merged', async () => {
   freshModel();
   window.Model = {};
   let calls = 0;
@@ -161,13 +155,31 @@ test('a failed fetch falls back to the server for the ids not yet merged', async
     return Promise.resolve({ ok: false, status: 503 });
   });
   GEPPETTO.MessageSocket.send.mockClear();
-  GEPPETTO.DirectTermInfo.enabled = true;
-  const cb = () => null;
-  GEPPETTO.Manager.fetchVariables(['Cachero2010', 'VFBlicense_CC_BY_4_0'], 'vfbqueryTermInfo', cb);
-  await new Promise(r => setTimeout(r, 20));
+  events.length = 0;
+  const cb = jest.fn();
+  const failed = jest.fn();
+  GEPPETTO.Manager.fetchVariables(['Cachero2010', 'VFBlicense_CC_BY_4_0'], 'vfbqueryTermInfo', cb, failed);
+  const deadline = Date.now() + 2000;
+  while (failed.mock.calls.length === 0 && Date.now() < deadline) {
+    await new Promise(r => setTimeout(r, 5));
+  }
   expect(ModelFactory.geppettoModel.getVariables().some(x => x.getId() === 'Cachero2010')).toBe(true);
-  expect(GEPPETTO.MessageSocket.send).toHaveBeenCalledWith('fetch_variable', expect.objectContaining({ variableId: ['VFBlicense_CC_BY_4_0'] }), cb);
+  expect(cb).not.toHaveBeenCalled();
+  expect(failed).toHaveBeenCalledWith(expect.objectContaining({ reason: 'http503' }));
+  expect(GEPPETTO.MessageSocket.send).not.toHaveBeenCalled();
+  expect(events.find(e => e[0] === 'geppetto:request_failed')[1]).toMatchObject({ command: 'fetch_variable', ids: ['VFBlicense_CC_BY_4_0'] });
   expect(events.filter(e => e[0] === 'geppetto:direct_terminfo').map(e => e[1].ok)).toEqual([true, false]);
+});
+
+test('a datasource the client has no source for fails at once', () => {
+  freshModel();
+  window.Model = {};
+  events.length = 0;
+  const failed = jest.fn();
+  GEPPETTO.Manager.fetchVariables(['X'], 'neo4JDataSourceService', () => null, failed);
+  expect(failed).toHaveBeenCalled();
+  expect(GEPPETTO.MessageSocket.send).not.toHaveBeenCalled();
+  expect(events.find(e => e[0] === 'geppetto:request_failed')[1].command).toBe('fetch_variable');
 });
 
 test('markdown and count helpers match the server', () => {

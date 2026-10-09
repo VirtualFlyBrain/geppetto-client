@@ -126,15 +126,6 @@ define(function (require) {
       },
 
       /**
-       * Sets idle timeout, -1 for no timeout
-       *
-       * @param timeOut
-       */
-      setIdleTimeOut: function (timeOut) {
-        GEPPETTO.Main.idleTime = timeOut;
-      },
-
-      /**
        * Enables Geppetto local storage features (persist views with no db)
        *
        * @param enabled

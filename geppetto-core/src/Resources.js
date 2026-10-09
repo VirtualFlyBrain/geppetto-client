@@ -96,14 +96,6 @@ export default {
     GHOST: .3,
   },
 
-  SocketStatus: {
-    CLOSE: 0,
-    OPEN: 1,
-    RECONNECTING: 2,
-  },
-
-  RECONNECTION_ERROR: "The client was not able to reconnect to the Backend, the page will be reloaded.",
-
   PROJECT_LOADED: "Project loaded",
 
   MODEL_LOADED: "The model for the current project has been loaded",
@@ -295,12 +287,6 @@ export default {
 
   SIMULATION_OBSERVED: 'Sent: Simulation being observed',
 
-  WEBSOCKET_NOT_SUPPORTED: 'Error: WebSocket is not supported by this browser.',
-
-  WEBSOCKET_OPENED: 'Info: WebSocket connection opened',
-
-  WEBSOCKET_CLOSED: "Info: WebSocket connection closed",
-
   CLEAR_CANVAS: "Inbound Message Received: Clear canvas",
 
   INVALID_SIMULATION_FILE: "Invalid Simulation File",
@@ -335,10 +321,6 @@ export default {
   GEPPETTO_VERSION_HOLDER: "Geppetto v$1 is ready",
 
   SIMULATOR_UNAVAILABLE: " is Unavailable",
-
-  WEBSOCKET_CONNECTION_ERROR: "Server Connection Error",
-
-  WEBSOCKET_RECONNECTION: "Client is attempting to reconnect",
 
   STOP_SIMULATION_TUTORIAL: "Tutorial Starting",
 
@@ -421,18 +403,6 @@ export default {
   REMOTE_VARIABLEVISUALISER_WIDGETS: "Variable Visualiser widget(s) removed",
   REMOVE_CONNECTIVITY_WIDGETS: "Connectivity widget(s) removed",
   NON_EXISTENT_WIDGETS: "Unable to remove widgets, type doesn't exist",
-
-  /**
-   * Idle messages
-   */
-  IDLE_MESSAGE: "Are you still there?",
-
-  DISCONNECT_MESSAGE: "Prolonged inactivity has been detected and you have been disconnected from Geppetto. Please refresh your browser if you wish to continue",
-
-  /**
-   * Socket Messages
-   */
-  SERVER_CONNECTION_ERROR: "Error communicating with Geppetto. \nReload page if problems persits",
 
   /**
    * Node Resources

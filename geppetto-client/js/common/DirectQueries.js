@@ -14,15 +14,12 @@ import { fetchWithRetry, failureReason, callTag } from './RetryFetch';
  *
  * Only queries whose chain is exactly [SimpleQuery GET, ProcessQuery
  * vfbqueryJsonProcessor] on a vfbqueryDataSource datasource are handled;
- * anything else (the legacy Neo4j/Owlery chains) goes to the server, as
- * does a failed fetch. Off unless the application sets
- * GEPPETTO.DirectQueries.enabled.
+ * anything else (the legacy Neo4j/Owlery chains) needed the server and
+ * can no longer run.
  */
 import { responseToQueryResults, responseToCount, combineResults } from './QueryResultsModel';
 
 export default function DirectQueries (GEPPETTO) {
-
-  this.enabled = false;
 
   var rawModel = function () {
     return GEPPETTO.ModelFactory.geppettoModel.getWrappedObj();
@@ -83,7 +80,7 @@ export default function DirectQueries (GEPPETTO) {
   };
 
   this.canRun = function (queries) {
-    if (!this.enabled || !queries || queries.length === 0) {
+    if (!queries || queries.length === 0) {
       return false;
     }
     for (var i = 0; i < queries.length; i++) {
@@ -160,9 +157,9 @@ export default function DirectQueries (GEPPETTO) {
 
   /**
    * Run the queries and call callback(jsonString) with the serialised
-   * QueryResults, or fallback() to have the server run them.
+   * QueryResults, or failed(error).
    */
-  this.run = function (queries, callback, offset, limit, fallback) {
+  this.run = function (queries, callback, offset, limit, failed) {
     var that = this;
     var startedAt = Date.now();
     var imageRef = this.imageTypeRef();
@@ -179,16 +176,16 @@ export default function DirectQueries (GEPPETTO) {
     }).catch(function (err) {
       console.error('DirectQueries - could not run in the client after '
         + (err && err.attempts ? err.attempts : 1) + ' attempt(s) ('
-        + failureReason(err) + '), asking the server: ' + (err && err.message ? err.message : err));
+        + failureReason(err) + '): ' + (err && err.message ? err.message : err));
       report('run', false, Date.now() - startedAt, queries[0].query.getId(), err);
-      fallback();
+      failed(err);
     });
   };
 
   /**
-   * Count the queries\' results and call callback(count), or fallback().
+   * Count the queries\' results and call callback(count), or failed(error).
    */
-  this.count = function (queries, callback, fallback) {
+  this.count = function (queries, callback, failed) {
     var that = this;
     var startedAt = Date.now();
     Promise.all(queries.map(function (q) {
@@ -205,9 +202,9 @@ export default function DirectQueries (GEPPETTO) {
     }).catch(function (err) {
       console.error('DirectQueries - could not count in the client after '
         + (err && err.attempts ? err.attempts : 1) + ' attempt(s) ('
-        + failureReason(err) + '), asking the server: ' + (err && err.message ? err.message : err));
+        + failureReason(err) + '): ' + (err && err.message ? err.message : err));
       report('count', false, Date.now() - startedAt, queries[0].query.getId(), err);
-      fallback();
+      failed(err);
     });
   };
 }

@@ -62,8 +62,8 @@ ImportType.prototype.getModelInterpreterId = function () {
  *
  * @command ImportType.resolve()
  */
-ImportType.prototype.resolve = function (callback) {
-  GEPPETTO.Manager.resolveImportType(this.getPath(), callback);
+ImportType.prototype.resolve = function (callback, onFailed) {
+  GEPPETTO.Manager.resolveImportType(this.getPath(), callback, onFailed);
 };
 
 // Compatibility with new imports and old require syntax

@@ -121,12 +121,14 @@ Datasource.prototype.getChildren = function () {
  * Fetch variable and add to Geppetto model given variable id
  *
  * @param variableId
+ * @param callback - once the variables are in the model
+ * @param onFailed - (error) if they could not be fetched
  */
-Datasource.prototype.fetchVariable = function (variableIds, callback) {
+Datasource.prototype.fetchVariable = function (variableIds, callback, onFailed) {
   if (typeof(variableIds) == "string"){
     variableIds = [variableIds];   
   }
-  GEPPETTO.Manager.fetchVariables(variableIds, this.getId(), callback);
+  GEPPETTO.Manager.fetchVariables(variableIds, this.getId(), callback, onFailed);
 };
 
 // Compatibility with new imports and old require syntax

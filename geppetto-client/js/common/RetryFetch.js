@@ -1,12 +1,9 @@
 /**
  * One fetch, retried, with a reason when it finally gives up.
  *
- * Every direct path used to make a single request and fall back to the server
- * on the first failure -- and the server, for these, does nothing cleverer
- * than fetch the same URL again. A transient 503 or a dropped connection
- * therefore cost a round trip through the websocket to reach the same file,
- * and for a term this client built the server cannot resolve it at all.
- * Retrying here is both cheaper and the only thing that can actually recover.
+ * Everything the client loads comes through here (there is no server to fall
+ * back to), so a transient 503 or a dropped connection is retried, and a
+ * download that drops part-way is resumed from where it stopped.
  *
  * A failure that survives the retries is reported with a reason and the call
  * that failed, because the events only carried a duration and could not say
@@ -423,9 +420,11 @@ if (typeof window !== 'undefined' && typeof window.addEventListener === 'functio
   window.addEventListener('pageshow', function () {
     leaving = false;
   });
-  // Page Lifecycle API: Chrome/Android backgrounding a tab under memory or
-  // battery pressure. Not supported everywhere (notably not Safari), so this
-  // is a bonus signal where the browser offers it, never a requirement.
+  /*
+   * Page Lifecycle API: Chrome/Android backgrounding a tab under memory or
+   * battery pressure. Not supported everywhere (notably not Safari), so this
+   * is a bonus signal where the browser offers it, never a requirement.
+   */
   document.addEventListener('freeze', function () {
     freezeCount++;
   });

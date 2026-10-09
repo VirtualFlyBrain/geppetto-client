@@ -39,7 +39,7 @@ require('@geppettoengine/geppetto-client/geppettoModel/QueriesController');
 global.__amd(GEPPETTO);
 console.warn = () => null;
 /*
- * A failed fetch is retried before anything falls back to the server. The
+ * A failed fetch is retried before it is reported. The
  * tests want the retries, not the waiting between them.
  */
 window.VFB_FETCH_BACKOFF_MS = [0, 0, 0];
@@ -155,26 +155,18 @@ test('a vfbquery query resolves to its GET on the model datasource', () => {
   expect(dq.queryUrl(resolved, 'FBbt_00003676', false, 10000, 10000)).toBe('https://v3-cached.virtualflybrain.org/run_query?id=FBbt_00003676&query_type=NeuronsPartHere&offset=10000&limit=10000');
   expect(dq.resolveQuery('NoSuchQuery')).toBe(null);
   expect(dq.imageTypeRef()).toBe(IMAGE_REF);
-  dq.enabled = true;
   expect(dq.canRun([queryDTO('FBbt_00003676', 'PartsOf')])).toBe(true);
   expect(dq.canRun([{ target: queryDTO('FBbt_00003676', 'PartsOf').target, query: { getPath: () => 'NoSuchQuery' } }])).toBe(false);
-  dq.enabled = false;
-  expect(dq.canRun([queryDTO('FBbt_00003676', 'PartsOf')])).toBe(false);
+  expect(dq.canRun([])).toBe(false);
 });
 
-test('QueriesController runs and counts in the client when enabled, on the server otherwise', async () => {
+test('QueriesController runs and counts in the client', async () => {
   loadModel();
   const c = capture('FBbt_00003676', 'ListAllAvailableImages');
   global.fetch = jest.fn(url => Promise.resolve({ ok: true, json: () => Promise.resolve(c.response) }));
   const dto = [queryDTO('FBbt_00003676', 'ListAllAvailableImages')];
-
-  GEPPETTO.DirectQueries.enabled = false;
-  GEPPETTO.QueriesController.runQuery(dto, () => null, 0, 10000);
-  expect(GEPPETTO.MessageSocket.send).toHaveBeenCalledWith('run_query', expect.objectContaining({ runnableQueries: [{ targetVariablePath: 'FBbt_00003676', queryPath: 'ListAllAvailableImages' }], offset: 0, limit: 10000 }), expect.any(Function));
-  expect(global.fetch).not.toHaveBeenCalled();
-
   GEPPETTO.MessageSocket.send.mockClear();
-  GEPPETTO.DirectQueries.enabled = true;
+
   const json = await new Promise(resolve => GEPPETTO.QueriesController.runQuery(dto, resolve, 0, 10000));
   expect(GEPPETTO.MessageSocket.send).not.toHaveBeenCalled();
   expect(global.fetch).toHaveBeenCalledWith('https://v3-cached.virtualflybrain.org/run_query?id=FBbt_00003676&query_type=ListAllAvailableImages');
@@ -184,18 +176,36 @@ test('QueriesController runs and counts in the client when enabled, on the serve
   expect(events.filter(e => e[0] === 'geppetto:direct_query').map(e => e[1].kind + ':' + e[1].ok)).toEqual(['run:true', 'count:true']);
 });
 
-test('a failed fetch falls back to the server', async () => {
+test('a failed fetch is reported, not answered', async () => {
   loadModel();
   global.fetch = jest.fn(() => Promise.resolve({ ok: false, status: 502 }));
   GEPPETTO.MessageSocket.send.mockClear();
-  GEPPETTO.DirectQueries.enabled = true;
+  events.length = 0;
   const dto = [queryDTO('FBbt_00003676', 'PartsOf')];
-  const cb = () => null;
-  GEPPETTO.QueriesController.runQuery(dto, cb, 0, 10000);
-  await new Promise(r => setTimeout(r, 20));
-  expect(GEPPETTO.MessageSocket.send).toHaveBeenCalledWith('run_query', expect.objectContaining({ runnableQueries: [{ targetVariablePath: 'FBbt_00003676', queryPath: 'PartsOf' }] }), expect.any(Function));
-  GEPPETTO.QueriesController.getQueriesCount(dto, cb);
-  await new Promise(r => setTimeout(r, 20));
-  expect(GEPPETTO.MessageSocket.send).toHaveBeenCalledWith('run_query_count', expect.anything(), expect.any(Function));
+  const cb = jest.fn();
+  const failed = jest.fn();
+  GEPPETTO.QueriesController.runQuery(dto, cb, 0, 10000, failed);
+  GEPPETTO.QueriesController.getQueriesCount(dto, cb, failed);
+  const deadline = Date.now() + 2000;
+  while (failed.mock.calls.length < 2 && Date.now() < deadline) {
+    await new Promise(r => setTimeout(r, 5));
+  }
+  expect(failed).toHaveBeenCalledTimes(2);
+  expect(cb).not.toHaveBeenCalled();
+  expect(GEPPETTO.MessageSocket.send).not.toHaveBeenCalled();
+  expect(events.filter(e => e[0] === 'geppetto:request_failed').map(e => e[1].command).sort()).toEqual(['run_query', 'run_query_count']);
+  expect(events.filter(e => e[0] === 'geppetto:request_failed')[0][1].ids).toEqual(['PartsOf(FBbt_00003676)']);
   expect(events.filter(e => e[0] === 'geppetto:direct_query').map(e => e[1].ok)).toEqual([false, false]);
+});
+
+test('a query the client cannot run fails at once, and an empty count is 0', () => {
+  loadModel();
+  events.length = 0;
+  const failed = jest.fn();
+  const target = queryDTO('FBbt_00003676', 'PartsOf').target;
+  GEPPETTO.QueriesController.runQuery([{ target, query: { getPath: () => 'NoSuchQuery', getId: () => 'NoSuchQuery' } }], () => null, 0, 10, failed);
+  expect(failed).toHaveBeenCalled();
+  const count = jest.fn();
+  GEPPETTO.QueriesController.getQueriesCount([], count);
+  expect(count).toHaveBeenCalledWith(0);
 });

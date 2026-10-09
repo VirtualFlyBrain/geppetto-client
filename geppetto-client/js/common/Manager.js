@@ -94,70 +94,53 @@ Manager.prototype = {
   },
 
   /**
-   * Fetch variable
-   *
-   * @param variableId
-   * @param datasourceId
-   */
-  fetchVariables: function (variableIds, datasourceId, callback) {
-    if (!Object.prototype.hasOwnProperty.call(window.Model, variableIds)) {
-      /*
-       * A VFB term's info needs no server state: fetch it here and merge
-       * the same model the server would have built. Any other datasource,
-       * or a failed fetch, goes to the server as before.
-       */
-      if (GEPPETTO.DirectTermInfo !== undefined && GEPPETTO.DirectTermInfo.canFetch(datasourceId)) {
-        var that = this;
-        var ids = typeof variableIds == "string" ? [variableIds] : variableIds;
-        GEPPETTO.DirectTermInfo.fetch(ids, datasourceId, callback, function (remaining) {
-          that.fetchVariablesOnServer(remaining, datasourceId, callback);
-        });
-        return;
-      }
-      this.fetchVariablesOnServer(variableIds, datasourceId, callback);
-    } else {
-      GEPPETTO.CommandController.log(GEPPETTO.Resources.VARIABLE_ALREADY_EXISTS);
-      // the variable already exists, run the callback
-      callback();
-    }
-  },
-
-  /**
-   * Fetch variables from the server
+   * Fetch variables into the model. Only a VFB term-info datasource can be
+   * fetched (DirectTermInfo builds the term in the client); there is no
+   * server to ask for anything else.
    *
    * @param variableIds
    * @param datasourceId
+   * @param callback - once they are in the model
+   * @param onFailed - (error) if they could not be fetched
    */
-  fetchVariablesOnServer: function (variableIds, datasourceId, callback) {
-    var params = {};
-    params["projectId"] = Project.getId();
-    params["variableId"] = variableIds;
-    params["dataSourceId"] = datasourceId;
-
-    var requestID = GEPPETTO.MessageSocket.send("fetch_variable", params, callback);
-
-    GEPPETTO.trigger('spin_logo');
+  fetchVariables: function (variableIds, datasourceId, callback, onFailed) {
+    if (Object.prototype.hasOwnProperty.call(window.Model, variableIds)) {
+      GEPPETTO.CommandController.log(GEPPETTO.Resources.VARIABLE_ALREADY_EXISTS);
+      // the variable already exists, run the callback
+      if (callback !== undefined) {
+        callback();
+      }
+      return;
+    }
+    var ids = typeof variableIds == "string" ? [variableIds] : variableIds;
+    if (GEPPETTO.DirectTermInfo === undefined || !GEPPETTO.DirectTermInfo.canFetch(datasourceId)) {
+      this.requestFailed('fetch_variable', ids, new Error('no client-side source for datasource ' + datasourceId), onFailed);
+      return;
+    }
+    var that = this;
+    GEPPETTO.DirectTermInfo.fetch(ids, datasourceId, callback, function (remaining, err) {
+      that.requestFailed('fetch_variable', remaining, err, onFailed);
+    });
   },
 
   /**
-   * Fetch variables and instances
-   *
-   * @param variables
-   * @param instances
-   * @param worldId
-   * @param datasourceId
+   * Fetch variables and instances. Only the Geppetto server could.
    */
-  fetch: function (variableIds, instanceIds, worldId, datasourceId, callback) {
-    var params = {};
-    params["projectId"] = Project.getId();
-    params["variables"] = variableIds;
-    params["instances"] = instanceIds;
-    params["worldId"] = worldId;
-    params["dataSourceId"] = datasourceId;
+  fetch: function (variableIds, instanceIds, worldId, datasourceId, callback, onFailed) {
+    this.requestFailed('fetch', variableIds, new Error('fetching instances needs a Geppetto server'), onFailed);
+  },
 
-    var requestID = GEPPETTO.MessageSocket.send("fetch", params, callback);
-
-    GEPPETTO.trigger('spin_logo');
+  /**
+   * Something asked for could not be loaded. Tell the application (it used
+   * to hear this from the socket when a request was lost) and the caller.
+   */
+  requestFailed: function (command, what, err, onFailed) {
+    var reason = (err && err.reason) ? err.reason : 'error';
+    console.error('Geppetto: ' + command + ' failed for ' + what + ': ' + (err && err.message ? err.message : err));
+    GEPPETTO.trigger('geppetto:request_failed', { command: command, ids: what, reason: reason });
+    if (typeof onFailed === 'function') {
+      onFailed(err);
+    }
   },
 
   /**
@@ -178,48 +161,26 @@ Manager.prototype = {
   },
 
   /**
-   * Resolve import type
+   * Resolve import types: fetch the OBJ/SWC each one points at and merge
+   * the type it describes (DirectGeometry). There is no server to resolve
+   * any other kind.
    *
-   * @param typePath
+   * @param typePaths
+   * @param callback - once all are merged
+   * @param onFailed - (error) if any could not be
    */
-  resolveImportType: function (typePaths, callback) {
+  resolveImportType: function (typePaths, callback, onFailed) {
     if (typeof typePaths == "string") {
       typePaths = [typePaths];
     }
-    /*
-     * OBJ and SWC imports need no server state: fetch the file here and
-     * merge the same type the server would have sent. Anything the client
-     * cannot resolve - other interpreters, a failed fetch - goes to the
-     * server as before.
-     */
-    if (GEPPETTO.DirectGeometry !== undefined && GEPPETTO.DirectGeometry.canResolve(typePaths)) {
-      var that = this;
-      GEPPETTO.DirectGeometry.resolve(typePaths, callback, function (paths) {
-        that.resolveImportTypeOnServer(paths, callback);
-      });
+    if (GEPPETTO.DirectGeometry === undefined || !GEPPETTO.DirectGeometry.canResolve(typePaths)) {
+      this.requestFailed('resolve_import_type', typePaths, new Error('no client-side resolver for these imports'), onFailed);
       return;
     }
-    this.resolveImportTypeOnServer(typePaths, callback);
-  },
-
-  /**
-   * Resolve import type on the server
-   *
-   * @param typePaths
-   */
-  resolveImportTypeOnServer: function (typePaths, callback) {
-    var params = {};
-    params["projectId"] = Project.getId();
-    // replace client naming first occurrence - the server doesn't know about it
-    var paths = [];
-    for (var i = 0; i < typePaths.length; i++) {
-      paths.push(typePaths[i].replace(GEPPETTO.Resources.MODEL_PREFIX_CLIENT + ".", ''));
-    }
-    params["paths"] = paths;
-
-    var requestID = GEPPETTO.MessageSocket.send("resolve_import_type", params, callback);
-
-    GEPPETTO.trigger('spin_logo');
+    var that = this;
+    GEPPETTO.DirectGeometry.resolve(typePaths, callback, function (paths, err) {
+      that.requestFailed('resolve_import_type', paths, err, onFailed);
+    });
   },
 
   /**
@@ -242,20 +203,10 @@ Manager.prototype = {
   },
 
   /**
-   *
-   * @param typePath
-   * @param callback
+   * Resolve an import value. Only the Geppetto server could.
    */
-  resolveImportValue: function (typePath, callback) {
-    var params = {};
-    params["experimentId"] = Project.getActiveExperiment().getId();
-    params["projectId"] = Project.getId();
-    // replace client naming first occurrence - the server doesn't know about it
-    params["path"] = typePath.replace(GEPPETTO.Resources.MODEL_PREFIX_CLIENT + ".", '');
-
-    var requestID = GEPPETTO.MessageSocket.send("resolve_import_value", params, callback);
-
-    GEPPETTO.trigger('spin_logo');
+  resolveImportValue: function (typePath, callback, onFailed) {
+    this.requestFailed('resolve_import_value', [typePath], new Error('resolving import values needs a Geppetto server'), onFailed);
   },
 
   /**

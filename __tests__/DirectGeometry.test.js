@@ -33,8 +33,8 @@ GEPPETTO.CommandController = { log: () => null, createTags: () => null };
 GEPPETTO.DirectGeometry = new DirectGeometry(GEPPETTO);
 console.warn = () => null;
 /*
- * A failed fetch is retried before anything falls back to the server. The
- * tests want the retries, not the waiting between them.
+ * A failed fetch is retried before it is reported. The tests want the
+ * retries, not the waiting between them.
  */
 window.VFB_FETCH_BACKOFF_MS = [0, 0, 0];
 
@@ -137,21 +137,15 @@ test('the wrapped SWC type merges exactly as the server reply does', () => {
   expect(inst.getType().getVariables().length).toBe(4);
 });
 
-test('Manager.resolveImportType goes to the client when enabled, to the server otherwise', async () => {
+test('Manager.resolveImportType fetches and merges the file in the client', async () => {
   loadTerm();
   const serverReply = readJson('VFB_jrmc2yzg.server_obj.json');
   const objText = unsynched(serverReply).defaultValue.obj;
   global.fetch = jest.fn(() => Promise.resolve({ ok: true, text: () => Promise.resolve(objText) }));
   delete window.location;
   window.location = { protocol: 'https:' };
-
-  GEPPETTO.DirectGeometry.enabled = false;
-  GEPPETTO.Manager.resolveImportType('OBJLibrary.VFB_jrmc2yzg_obj', () => null);
-  expect(GEPPETTO.MessageSocket.send).toHaveBeenCalledWith('resolve_import_type', expect.objectContaining({ paths: ['OBJLibrary.VFB_jrmc2yzg_obj'] }), expect.any(Function));
-  expect(global.fetch).not.toHaveBeenCalled();
-
   GEPPETTO.MessageSocket.send.mockClear();
-  GEPPETTO.DirectGeometry.enabled = true;
+
   const done = new Promise(resolve => GEPPETTO.Manager.resolveImportType('Model.OBJLibrary.VFB_jrmc2yzg_obj', resolve));
   await done;
   expect(GEPPETTO.MessageSocket.send).not.toHaveBeenCalled();
@@ -164,28 +158,39 @@ test('Manager.resolveImportType goes to the client when enabled, to the server o
   expect(events.some(e => e[0] === 'stop_spin_logo')).toBe(true);
 });
 
-test('a failed fetch falls back to the server and reports it', async () => {
+test('a failed fetch is reported to the caller and the application', async () => {
   loadTerm();
   global.fetch = jest.fn(() => Promise.resolve({ ok: false, status: 503 }));
   delete window.location;
   window.location = { protocol: 'https:' };
   GEPPETTO.MessageSocket.send.mockClear();
-  GEPPETTO.DirectGeometry.enabled = true;
-  const cb = () => null;
-  GEPPETTO.Manager.resolveImportType('SWCLibrary.VFB_jrmc2yzg_swc', cb);
-  await settle(() => GEPPETTO.MessageSocket.send.mock.calls.length > 0);
-  expect(GEPPETTO.MessageSocket.send).toHaveBeenCalledWith('resolve_import_type', expect.objectContaining({ paths: ['SWCLibrary.VFB_jrmc2yzg_swc'] }), cb);
+  events.length = 0;
+  const resolved = jest.fn();
+  const failed = jest.fn();
+  GEPPETTO.Manager.resolveImportType('SWCLibrary.VFB_jrmc2yzg_swc', resolved, failed);
+  await settle(() => failed.mock.calls.length > 0);
+  expect(failed).toHaveBeenCalledWith(expect.objectContaining({ reason: 'http503' }));
+  expect(resolved).not.toHaveBeenCalled();
+  expect(GEPPETTO.MessageSocket.send).not.toHaveBeenCalled();
   expect(typeAt('SWCLibrary', 'VFB_jrmc2yzg_swc').getMetaType()).toBe('ImportType');
-  const report = events.find(e => e[0] === 'geppetto:direct_geometry');
-  expect(report[1].ok).toBe(false);
+  expect(events.find(e => e[0] === 'geppetto:direct_geometry')[1].ok).toBe(false);
+  expect(events.find(e => e[0] === 'geppetto:request_failed')[1]).toMatchObject({
+    command: 'resolve_import_type', ids: ['SWCLibrary.VFB_jrmc2yzg_swc'], reason: 'http503'
+  });
 });
 
-test('mixed lists with an interpreter the client cannot stand in for go to the server whole', () => {
+test('a list with an import the client cannot resolve is refused whole', () => {
   loadTerm();
   GEPPETTO.MessageSocket.send.mockClear();
-  GEPPETTO.DirectGeometry.enabled = true;
-  expect(GEPPETTO.DirectGeometry.canResolve(['OBJLibrary.VFB_jrmc2yzg_obj', 'vfbLibrary.VFB_jrmc2yzg_metadata'])).toBe(false);
+  events.length = 0;
+  const mixed = ['OBJLibrary.VFB_jrmc2yzg_obj', 'vfbLibrary.VFB_jrmc2yzg_metadata'];
+  expect(GEPPETTO.DirectGeometry.canResolve(mixed)).toBe(false);
   expect(GEPPETTO.DirectGeometry.canResolve([])).toBe(false);
+  const failed = jest.fn();
+  GEPPETTO.Manager.resolveImportType(mixed, () => null, failed);
+  expect(failed).toHaveBeenCalled();
+  expect(GEPPETTO.MessageSocket.send).not.toHaveBeenCalled();
+  expect(events.find(e => e[0] === 'geppetto:request_failed')[1].command).toBe('resolve_import_type');
   expect(DirectGeometryModule.fetchUrl('http://x/y.obj', 'https:')).toBe('https://x/y.obj');
   expect(DirectGeometryModule.fetchUrl('http://x/y.obj', 'http:')).toBe('http://x/y.obj');
 });
@@ -292,28 +297,10 @@ test('a vertex-only OBJ is a point cloud, not a failure', () => {
   expect(raw.defaultValue.objGeometry.indices.length).toBe(0);
 });
 
-test('a term the client built is not sent to the server, which never saw it', async () => {
-  loadTerm();
-  GEPPETTO.DirectTermInfo = { builtHere: { VFB_jrmc2yzg: true } };
-  global.fetch = jest.fn(() => Promise.resolve({ ok: false, status: 404 }));
-  delete window.location;
-  window.location = { protocol: 'https:' };
-  GEPPETTO.MessageSocket.send.mockClear();
-  GEPPETTO.DirectGeometry.enabled = true;
-  GEPPETTO.Manager.resolveImportType('SWCLibrary.VFB_jrmc2yzg_swc', () => null);
-  await new Promise(r => setTimeout(r, 300));
-  // asking would come back as "Couldn't find a type for the path ..."
-  expect(GEPPETTO.MessageSocket.send).not.toHaveBeenCalled();
-  delete GEPPETTO.DirectTermInfo;
-});
-
 /*
- * A single failure used to be the end of it: the client asked the server,
- * which for these does nothing cleverer than fetch the same URL again, and
- * for a term this client built cannot resolve it at all. Transient failures
- * are retried here instead, and what finally went wrong is reported.
+ * Transient failures are retried, and what finally went wrong is reported.
  */
-test('a transient failure is retried and recovers without the server', async () => {
+test('a transient failure is retried and recovers', async () => {
   loadTerm();
   let calls = 0;
   global.fetch = jest.fn(() => {
@@ -327,7 +314,6 @@ test('a transient failure is retried and recovers without the server', async () 
   window.location = { protocol: 'https:' };
   GEPPETTO.MessageSocket.send.mockClear();
   events.length = 0;
-  GEPPETTO.DirectGeometry.enabled = true;
   GEPPETTO.Manager.resolveImportType('SWCLibrary.VFB_jrmc2yzg_swc', () => null);
   await settle(() => calls >= 3);
   expect(calls).toBe(3);
@@ -347,7 +333,6 @@ test('a failure that survives the retries says why, and for which call', async (
   delete window.location;
   window.location = { protocol: 'https:' };
   events.length = 0;
-  GEPPETTO.DirectGeometry.enabled = true;
   GEPPETTO.Manager.resolveImportType('SWCLibrary.VFB_jrmc2yzg_swc', () => null);
   await new Promise(r => setTimeout(r, 300));
   expect(calls).toBe(4);
@@ -369,7 +354,6 @@ test('a 404 is not retried: it will not come good', async () => {
   delete window.location;
   window.location = { protocol: 'https:' };
   events.length = 0;
-  GEPPETTO.DirectGeometry.enabled = true;
   GEPPETTO.Manager.resolveImportType('SWCLibrary.VFB_jrmc2yzg_swc', () => null);
   await new Promise(r => setTimeout(r, 300));
   expect(calls).toBe(1);
@@ -707,7 +691,7 @@ test('a body with no headers at all still fails cleanly (no content-length to re
  * host does, with the same strong ETag on each) lets a body that broke off
  * carry on from the last byte parsed instead of starting over -- and a drop
  * that made progress is not a failed attempt, so a long transfer on a weak
- * link is not thrown to the server fallback for being interrupted.
+ * link is not given up on for being interrupted.
  */
 const OBJ = 'v 0 0 0\nv 1 0 0\nv 0 1 0\nv 1 1 0\nf 1 2 3\nf 2 3 4\n';
 const ETAG = '"6a2738c9-6e6640"';
@@ -901,7 +885,6 @@ test('a resolve that resumed reports the resume', async () => {
   global.fetch = server.fetch;
   delete window.location;
   window.location = { protocol: 'https:' };
-  GEPPETTO.DirectGeometry.enabled = true;
   const done = new Promise(resolve => GEPPETTO.Manager.resolveImportType('Model.OBJLibrary.VFB_jrmc2yzg_obj', resolve));
   await done;
   const report = events.find(e => e[0] === 'geppetto:direct_geometry');

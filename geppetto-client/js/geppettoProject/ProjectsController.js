@@ -13,15 +13,15 @@ define(function (require) {
         = {
         userProjects: null,
 
+        /*
+         * A user's stored projects lived on the Geppetto server; without one
+         * there are none.
+         */
         refreshUserProjects: function (callback){
-          var that = this;
-          // We execute an asynchronous call to fetch all the projects for the current user
-          $.ajax({ url: window.location.origin + window.location.pathname.substring(0,window.location.pathname.lastIndexOf("/")) + "/geppettoprojects" }).then(function (data) {
-            that.userProjects = data;
-            if (callback != undefined){
-              callback();
-            }
-          });
+          this.userProjects = [];
+          if (callback != undefined){
+            callback();
+          }
         },
 
         getUserProjects: function (){

@@ -184,98 +184,46 @@ define(['backbone'], function (require) {
     },
 
     /**
-     * Loads a project from content.
-     *
-     * @command Project.loadFromContent(projectID)
-     * @param {URL} projectID - Id of project to load
-     * @returns {String}  Status of attempt to load simulation using url.
+     * Loads a project by id. Stored projects lived on the Geppetto server,
+     * which this build does not have.
      */
     loadFromID: function (projectID, experimentID) {
-
-      GEPPETTO.WidgetsListener.update(GEPPETTO.WidgetsListener.WIDGET_EVENT_TYPE.DELETE);
-      GEPPETTO.trigger(GEPPETTO.Events.Project_loading);
-      console.time(GEPPETTO.Resources.LOADING_PROJECT);
-      GEPPETTO.trigger(GEPPETTO.Events.Show_spinner, GEPPETTO.Resources.LOADING_PROJECT);
-
-      var loadStatus = GEPPETTO.Resources.LOADING_PROJECT;
-
-      if (projectID != null && projectID != "") {
-        var parameters = {};
-        parameters["experimentId"] = experimentID;
-        parameters["projectId"] = projectID;
-        GEPPETTO.MessageSocket.send("load_project_from_id", parameters);
-        this.initializationTime = new Date();
-        GEPPETTO.CommandController.log("Message sent : " + this.initializationTime.getTime(), true);
-        GEPPETTO.CommandController.log(GEPPETTO.Resources.MESSAGE_OUTBOUND_LOAD, true);
-      } else {
-        loadStatus = GEPPETTO.Resources.PROJECT_UNSPECIFIED;
-      }
-
-      return loadStatus;
+      console.error('Project.loadFromID(' + projectID + ') needs a Geppetto server; use Project.loadFromURL');
+      return GEPPETTO.Resources.PROJECT_UNSPECIFIED;
     },
 
     /**
-     * Loads a project from url.
+     * Loads a project from url: the project's JSON descriptor, whose model
+     * it names. Read by the client itself (ProjectLoader); no server.
      *
-     * @command Project.loadFromContent(projectURL)
-     * @param {URL} simulationURL - URL of project to be loaded
+     * @command Project.loadFromURL(projectURL)
+     * @param {URL} projectURL - URL of project to be loaded
      * @returns {String}  Status of attempt to load project using url.
      */
     loadFromURL: function (projectURL) {
-
+      if (projectURL == null || projectURL == "") {
+        return GEPPETTO.Resources.PROJECT_UNSPECIFIED;
+      }
       GEPPETTO.WidgetsListener.update(GEPPETTO.WidgetsListener.WIDGET_EVENT_TYPE.DELETE);
-
       console.time(GEPPETTO.Resources.LOADING_PROJECT);
       GEPPETTO.trigger(GEPPETTO.Events.Project_loading);
       GEPPETTO.trigger(GEPPETTO.Events.Show_spinner, GEPPETTO.Resources.LOADING_PROJECT);
-
-      var loadStatus = GEPPETTO.Resources.LOADING_PROJECT;
-
-      if (projectURL != null && projectURL != "") {
-        GEPPETTO.MessageSocket.send("load_project_from_url", projectURL);
-        this.persisted = false;
-        this.initializationTime = new Date();
-        GEPPETTO.CommandController.log("Message sent : " + this.initializationTime.getTime(), true);
-        GEPPETTO.CommandController.log(GEPPETTO.Resources.MESSAGE_OUTBOUND_LOAD, true);
-        // trigger simulation restart event
-        GEPPETTO.trigger(GEPPETTO.Events.Simulation_restarted);
-      } else {
-        loadStatus = GEPPETTO.Resources.PROJECT_UNSPECIFIED;
-      }
-
-      return loadStatus;
+      this.persisted = false;
+      this.initializationTime = new Date();
+      GEPPETTO.ProjectLoader.load(projectURL).catch(function () {
+        // reported by the loader
+      });
+      // trigger simulation restart event
+      GEPPETTO.trigger(GEPPETTO.Events.Simulation_restarted);
+      return GEPPETTO.Resources.LOADING_PROJECT;
     },
 
     /**
-     * Loads a project from content.
-     *
-     * @command Project.loadFromContent(content)
-     * @param {String} content - Content of project to load
-     * @returns {String}  Status of attempt to load project
+     * Loads a project from content. Needed the Geppetto server.
      */
     loadFromContent: function (content) {
-
-      GEPPETTO.trigger(GEPPETTO.Events.Project_loading);
-      GEPPETTO.WidgetsListener.update(GEPPETTO.WidgetsListener.WIDGET_EVENT_TYPE.DELETE);
-
-      console.time(GEPPETTO.Resources.LOADING_PROJECT);
-      GEPPETTO.trigger(GEPPETTO.Events.Show_spinner, GEPPETTO.Resources.LOADING_PROJECT);
-
-      var loadStatus = GEPPETTO.Resources.LOADING_PROJECT;
-
-      if (content != null && content != "") {
-        // Updates the simulation controls visibility
-
-        GEPPETTO.MessageSocket.send("load_project_from_content", content);
-        this.initializationTime = new Date();
-        GEPPETTO.CommandController.log("Message sent : " + this.initializationTime.getTime(), true);
-        GEPPETTO.CommandController.log(GEPPETTO.Resources.MESSAGE_OUTBOUND_LOAD, true);
-        // trigger simulation restart event
-
-      } else {
-        loadStatus = GEPPETTO.Resources.PROJECT_UNSPECIFIED;
-      }
-      return loadStatus;
+      console.error('Project.loadFromContent needs a Geppetto server; use Project.loadFromURL');
+      return GEPPETTO.Resources.PROJECT_UNSPECIFIED;
     },
 
     saveProjectProperties: function (properties) {

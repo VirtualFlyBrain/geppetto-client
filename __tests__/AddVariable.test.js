@@ -3,7 +3,6 @@ const GEPPETTO = {};
 window.GEPPETTO = GEPPETTO;
 GEPPETTO.Resources = require('@geppettoengine/geppetto-core/Resources').default;
 require('@geppettoengine/geppetto-client/pages/geppetto/GEPPETTO.Events').default(GEPPETTO);
-require('@geppettoengine/geppetto-client/communication/MessageHandler').default(GEPPETTO);
 const Manager = require('@geppettoengine/geppetto-client/common/Manager').default;
 const ModelFactory = require('@geppettoengine/geppetto-core/ModelFactory').default(GEPPETTO);
 const testModel = require('./resources/test_model.json');
@@ -44,9 +43,8 @@ test('fetch instances', () => {
     "name": "N"
   });
 
-  const message = { type: 'fetched', data: JSON.stringify({ fetched: JSON.stringify(testModel) }) };
-
-  GEPPETTO.MessageHandler.onMessage(message);
+  // what a fetched reply used to do: merge the model and instantiate what is new
+  GEPPETTO.Manager.addVariableToModel(JSON.parse(JSON.stringify(testModel)));
 
   expect(ModelFactory.allPaths.length).toBe(allPathsLength + 1);
   expect(Instances.length).toBe(instanceLength + 1);

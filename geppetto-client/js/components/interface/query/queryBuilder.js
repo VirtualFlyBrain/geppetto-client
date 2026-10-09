@@ -644,26 +644,18 @@ define(function (require) {
      */
     requestDataSourceResults (data_source_name, data_source_url, crossDomain) {
       var that = this;
-      // not cross domain, get results via java servlet code
-      if (!crossDomain) {
-        var parameters = {};
-        parameters["data_source_name"] = data_source_name;
-        parameters["url"] = data_source_url;
-        GEPPETTO.MessageSocket.send("get_data_source_results", parameters);
-      } else {
-        // cross domain, do ajax query for results
-        $.ajax({
-          type: 'GET',
-          dataType: 'text',
-          url: data_source_url,
-          success: function (responseData, textStatus, jqXHR) {
-            that.updateDataSourceResults(data_source_name, JSON.parse(responseData));
-          },
-          error: function (responseData, textStatus, errorThrown) {
-            throw ("Error retrieving data sources " + data_source_name + "  from " + data_source_url);
-          }
-        });
-      }
+      // fetched by the browser; there is no server to proxy a same-origin request
+      $.ajax({
+        type: 'GET',
+        dataType: 'text',
+        url: data_source_url,
+        success: function (responseData, textStatus, jqXHR) {
+          that.updateDataSourceResults(data_source_name, JSON.parse(responseData));
+        },
+        error: function (responseData, textStatus, errorThrown) {
+          throw ("Error retrieving data sources " + data_source_name + "  from " + data_source_url);
+        }
+      });
     }
 
     /**

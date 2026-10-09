@@ -13,17 +13,14 @@ import { fetchWithRetry, failureReason, callTag } from './RetryFetch';
  * reply would have been merged. References are computed against the client's
  * own model, so there is no second copy to keep in step.
  *
- * Off unless the application sets GEPPETTO.DirectTermInfo.enabled. Only the
- * datasource whose service is vfbqueryTermInfoDataSource is handled; any
- * other datasource, or a failed fetch, goes to the server as before.
+ * Only the datasource whose service is vfbqueryTermInfoDataSource is
+ * handled; there is no server for any other.
  */
 import { termInfoToRawModel, shapeOf } from './TermInfoModel';
 
 var TERM_INFO_SERVICE = 'vfbqueryTermInfoDataSource';
 
 export default function DirectTermInfo (GEPPETTO) {
-
-  this.enabled = false;
 
   /**
    * The datasource with this id, if it is one this module can stand in for.
@@ -40,7 +37,7 @@ export default function DirectTermInfo (GEPPETTO) {
   };
 
   this.canFetch = function (datasourceId) {
-    return this.enabled && this.findDatasource(datasourceId) !== null;
+    return this.findDatasource(datasourceId) !== null;
   };
 
   /**
@@ -59,17 +56,9 @@ export default function DirectTermInfo (GEPPETTO) {
   /**
    * Fetch and merge each id in turn (the server merged a list in one reply;
    * one merge per id is the same model). Calls callback() when all are in,
-   * or fallback(ids) if anything failed so the caller can ask the server.
+   * or failed(ids not loaded, error) if one could not be.
    */
-  /*
-   * Terms this client built. The server never saw them, so it cannot resolve
-   * anything of theirs: asking it for one of their imports comes back as
-   * "Couldn't find a type for the path ...", which is worse than failing
-   * here. DirectGeometry checks this before falling back.
-   */
-  this.builtHere = {};
-
-  this.fetch = function (variableIds, datasourceId, callback, fallback) {
+  this.fetch = function (variableIds, datasourceId, callback, failed) {
     var that = this;
     var datasource = this.findDatasource(datasourceId);
     var startedAt = Date.now();
@@ -114,7 +103,6 @@ export default function DirectTermInfo (GEPPETTO) {
         var shape = shapeOf(GEPPETTO.ModelFactory.geppettoModel);
         var built = termInfoToRawModel(termInfo, id, shape);
         GEPPETTO.Manager.addVariableToModel(built.rawModel);
-        that.builtHere[id] = true;
         report(true, id, undefined, attemptsUsed);
         next(i + 1);
       }).catch(function (err) {
@@ -123,7 +111,7 @@ export default function DirectTermInfo (GEPPETTO) {
           + failureReason(err) + '): ' + (err && err.message ? err.message : err));
         report(false, id, err, (err && err.attempts) ? err.attempts : attemptsUsed);
         GEPPETTO.trigger('stop_spin_logo');
-        fallback(variableIds.slice(i));
+        failed(variableIds.slice(i), err);
       });
     };
     next(0);
