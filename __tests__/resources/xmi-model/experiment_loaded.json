@@ -1,0 +1,26 @@
+{
+ "eClass": "ExperimentState",
+ "experimentId": 1,
+ "projectId": 2094348788,
+ "recordedVariables": [
+  {
+   "eClass": "VariableValue",
+   "pointer": {
+    "eClass": "Pointer",
+    "path": "time(StateVariable)",
+    "elements": [
+     {
+      "eClass": "PointerElement",
+      "index": -1,
+      "variable": {
+       "$ref": "geppettoModel#//@variables.0"
+      },
+      "type": {
+       "$ref": "geppettoModel#//@libraries.5/@types.2"
+      }
+     }
+    ]
+   }
+  }
+ ]
+}
