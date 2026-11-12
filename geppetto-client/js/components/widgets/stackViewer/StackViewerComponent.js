@@ -214,90 +214,77 @@ define(function (require) {
       return true;
     },
 
-    callDstRange: function () {
-      var image = this.state.serverUrl.toString() + '?wlz=' + this.state.stack[0] + '&sel=0,255,255,255&mod=zeta&fxp=' + this.props.fxp.join(',') + '&scl=10.0&dst=0&pit=' + Number(this.state.pit).toFixed(0) + '&yaw=' + Number(this.state.yaw).toFixed(0) + '&rol=' + Number(this.state.rol).toFixed(0);
-      /*
-       * this.state.buffer[-1].text = 'Buffering stack...';
-       *get distance range;
-       */
+    /**
+     * Ask the image server for a property of the current view (distance range, tile size, image size).
+     * Uses GET so the answer can come from the cache when the image server itself is busy or restarting,
+     * retries with a backoff when the call fails, and drops any answer for a view that is no longer shown.
+     */
+    callServerMeta: function (obj, scl, onResult, attempt) {
+      attempt = attempt || 0;
+      var view = [this.state.stack[0], this.props.fxp.join(','), Number(this.state.pit).toFixed(0), Number(this.state.yaw).toFixed(0), Number(this.state.rol).toFixed(0)];
+      var isCurrent = function () {
+        return this._isMounted && view.join('|') === [this.state.stack[0], this.props.fxp.join(','), Number(this.state.pit).toFixed(0), Number(this.state.yaw).toFixed(0), Number(this.state.rol).toFixed(0)].join('|');
+      }.bind(this);
+      var retry = function (reason) {
+        if (attempt < 10 && isCurrent()) {
+          var wait = Math.min(1000 * Math.pow(2, attempt), 15000);
+          console.warn('Stack viewer: ' + obj + ' failed (' + reason + '), retrying in ' + (wait / 1000) + 's');
+          setTimeout(function () {
+            if (isCurrent()) {
+              this.callServerMeta(obj, scl, onResult, attempt + 1);
+            }
+          }.bind(this), wait);
+        } else if (isCurrent()) {
+          console.error('Stack viewer: ' + obj + ' failed (' + reason + '), giving up');
+        }
+      }.bind(this);
       $.ajax({
-        url: image + '&obj=Wlz-distance-range',
-        type: 'POST',
+        url: this.state.serverUrl.toString() + '?wlz=' + view[0] + '&sel=0,255,255,255&mod=zeta&fxp=' + view[1] + '&scl=' + scl + '&dst=0&pit=' + view[2] + '&yaw=' + view[3] + '&rol=' + view[4] + '&obj=' + obj,
+        type: 'GET',
+        dataType: 'text',
         success: function (data) {
-          if (data.indexOf('html') < 0) {
-            var result = data.trim().split(':')[1].split(' ');
-            var min = Number(result[0]);
-            var max = Number(result[1]);
-            this.setState({ minDst: min, maxDst: max });
-            var extent = { minDst: min, maxDst: max };
-            this.props.setExtent(extent);
-            // console.log('Stack Depth: ' + ((max - min) / 10.0).toFixed(0));
-            this.checkStack();
-            this.callPlaneEdges();
-            this.iBuffer = {};
-            this.state.lastUpdate = 0;
-            this.bufferStack();
-            this.animate();
+          if (!isCurrent()) {
+            return;
           }
+          var result = (data.indexOf('html') < 0 && data.indexOf(':') > -1) ? data.trim().split(':')[1].split(' ').map(Number) : [];
+          if (result.length < 2 || isNaN(result[0]) || isNaN(result[1])) {
+            retry('unexpected response');
+            return;
+          }
+          onResult(result);
+          this.checkStack();
+          this.callPlaneEdges();
+          this.iBuffer = {};
+          this.state.lastUpdate = 0;
+          this.bufferStack();
+          this.animate();
         }.bind(this),
         error: function (xhr, status, err) {
-          console.error("Calling Dst Range", status + " - " + xhr.progress().state(), err.toString());
-        }.bind(this)
+          retry(status + ' ' + err.toString());
+        }
       });
+    },
+
+    callDstRange: function () {
+      this.callServerMeta('Wlz-distance-range', '10.0', function (result) {
+        var extent = { minDst: result[0], maxDst: result[1] };
+        this.setState(extent);
+        this.props.setExtent(extent);
+      }.bind(this));
     },
 
     callTileSize: function () {
-      var image = this.state.serverUrl.toString() + '?wlz=' + this.state.stack[0] + '&sel=0,255,255,255&mod=zeta&fxp=' + this.props.fxp.join(',') + '&scl=1.0&dst=0&pit=' + Number(this.state.pit).toFixed(0) + '&yaw=' + Number(this.state.yaw).toFixed(0) + '&rol=' + Number(this.state.rol).toFixed(0);
-      // get tile size;
-      $.ajax({
-        url: image + '&obj=Tile-size',
-        type: 'POST',
-        success: function (data) {
-          if (data.indexOf('html') < 0) {
-            var result = data.trim().split(':')[1].split(' ');
-            var tileX = Number(result[0]);
-            var tileY = Number(result[1]);
-            this.setState({ tileX: tileX, tileY: tileY });
-            this.checkStack();
-            this.callPlaneEdges();
-            this.iBuffer = {};
-            this.state.lastUpdate = 0;
-            this.bufferStack();
-            this.animate();
-          }
-        }.bind(this),
-        error: function (xhr, status, err) {
-          console.error("Calling Tile Size", status + " - " + xhr.progress().state(), err.toString());
-        }.bind(this)
-      });
+      this.callServerMeta('Tile-size', '1.0', function (result) {
+        this.setState({ tileX: result[0], tileY: result[1] });
+      }.bind(this));
     },
 
     callImageSize: function () {
-      var image = this.state.serverUrl.toString() + '?wlz=' + this.state.stack[0] + '&sel=0,255,255,255&mod=zeta&fxp=' + this.props.fxp.join(',') + '&scl=10.0&dst=0&pit=' + Number(this.state.pit).toFixed(0) + '&yaw=' + Number(this.state.yaw).toFixed(0) + '&rol=' + Number(this.state.rol).toFixed(0);
-      // get image size;
-      $.ajax({
-        url: image + '&obj=Max-size',
-        type: 'POST',
-        success: function (data) {
-          if (data.indexOf('html') < 0) {
-            var result = data.trim().split(':')[1].split(' ');
-            var imageX = Math.ceil( Number(result[0] ));
-            var imageY = Math.ceil( Number(result[1] ));
-            var extent = { imageX: imageX, imageY: imageY };
-            this.setState(extent);
-            this.props.setExtent(extent);
-            this.checkStack();
-            this.callPlaneEdges();
-            this.iBuffer = {};
-            this.state.lastUpdate = 0;
-            this.bufferStack();
-            this.animate();
-          }
-        }.bind(this),
-        error: function (xhr, status, err) {
-          console.error("Calling Max Size", status + " - " + xhr.progress().state(), err.toString());
-        }.bind(this)
-      });
+      this.callServerMeta('Max-size', '10.0', function (result) {
+        var extent = { imageX: Math.ceil(result[0]), imageY: Math.ceil(result[1]) };
+        this.setState(extent);
+        this.props.setExtent(extent);
+      }.bind(this));
     },
 
     callPlaneEdges: function () {
@@ -1456,8 +1443,9 @@ define(function (require) {
         yaw = 0;
         rol = 0;
       }
+      // re-centre when the image size for the new plane arrives (see onExtentChange)
+      this.state.initalised = false;
       this.setState({ orth: orth, pit: pit, yaw: yaw, rol: rol, dst: 0, stackX: 0, stackY: 0 });
-      setTimeout(this.onHome, 5000);
     },
 
     toggleSlice: function () {
